@@ -96,6 +96,40 @@ public sealed class Poe2Live
         return l;
     }
 
+    private string _areaCode = ""; private nint _areaCodeFor = -1;
+
+    /// <summary>Area code identifier (e.g. "G1_town"). Cached per area.</summary>
+    public string AreaCode(nint areaInstance)
+    {
+        if (areaInstance == _areaCodeFor) return _areaCode;
+        _areaCodeFor = areaInstance;
+        var info = Ptr(areaInstance + Poe2.AreaInstance.AreaInfoPtr);
+        var s = Ptr(info);
+        _areaCode = s == 0 ? "" : _reader.ReadStringUtf16(s, 64);
+        return _areaCode;
+    }
+
+    private nint _plPlayer, _plPlayerFor;
+    private nint PlayerComp(nint localPlayer)
+    {
+        if (localPlayer != _plPlayerFor) { _plPlayerFor = localPlayer; _plPlayer = ResolveComponent(localPlayer, "Player"); }
+        return _plPlayer;
+    }
+
+    /// <summary>Local character name (validated via StdWString @ Player+0x1B0).</summary>
+    public string PlayerName(nint localPlayer)
+    {
+        var c = PlayerComp(localPlayer);
+        return c == 0 ? "" : ReadStdWString(c + Poe2.PlayerComponent.Name);
+    }
+
+    /// <summary>Local character level (byte @ Player+0x204).</summary>
+    public int PlayerLevel(nint localPlayer)
+    {
+        var c = PlayerComp(localPlayer);
+        return c != 0 && _reader.TryReadStruct<byte>(c + Poe2.PlayerComponent.Level, out var b) ? b : 0;
+    }
+
     /// <summary>Player grid position (from the Render component's world position ÷ grid ratio).</summary>
     public System.Numerics.Vector2? PlayerGrid(nint localPlayer) => EntityGrid(localPlayer);
 

@@ -22,4 +22,7 @@ public sealed record RenderContext(
     // Auto-flask status.
     float HpPct,
     float ManaPct,
-    string FlaskNote);
+    string FlaskNote,
+    // Area / character HUD.
+    string AreaCode,
+    int CharLevel);

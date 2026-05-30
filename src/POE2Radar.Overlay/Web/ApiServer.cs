@@ -69,7 +69,9 @@ public sealed class ApiServer : IDisposable
                     .ToDictionary(g => g.Key.ToString(), g => g.Count());
                 Write(ctx, 200, JsonSerializer.Serialize(new
                 {
-                    s.InGame, areaHash = s.AreaHash, areaLevel = s.AreaLevel, mapVisible = s.MapVisible, zoom = s.Zoom,
+                    s.InGame, areaCode = s.AreaCode, areaHash = s.AreaHash, areaLevel = s.AreaLevel,
+                    character = s.CharName, charLevel = s.CharLevel,
+                    mapVisible = s.MapVisible, zoom = s.Zoom,
                     hpPct = s.HpPct, manaPct = s.ManaPct, autoFlask = s.AutoFlask, flask = s.FlaskNote,
                     player = new { x = s.Player.X, y = s.Player.Y },
                     entityCount = s.Entities.Count,
@@ -167,9 +169,12 @@ public sealed record RadarState(
     float HpPct,
     float ManaPct,
     bool AutoFlask,
-    string FlaskNote)
+    string FlaskNote,
+    string AreaCode,
+    string CharName,
+    int CharLevel)
 {
     public static readonly RadarState Empty =
         new(false, 0, 0, false, 0, System.Numerics.Vector2.Zero,
-            Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), 100, 100, false, "");
+            Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), 100, 100, false, "", "", "", 0);
 }

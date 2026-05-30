@@ -56,6 +56,7 @@ public static class Poe2
     /// </summary>
     public static class AreaInstance
     {
+        public const int AreaInfoPtr      = 0x0A0;  // ✓ → AreaInfo; +0x00 → UTF-16 "Code\0Name\0" (Code validated 'G1_town')
         public const int LocalPlayer      = 0x5A0;  // ✓ → player Entity (value-scanned player matched here)
         public const int ServerDataPtr    = 0x580;  // candidate (heap ptr just before the player slot)
         public const int AwakeEntities    = 0x6C0;  // ✓ StdMap of live entities (id→EntityPtr); validated size=378
@@ -131,6 +132,13 @@ public static class Poe2
     {
         public const int CurrentWorldPosition = 0x138; // ✓ Vector3 (X,Y,Z); grid = XY / WorldToGridRatio
         public const int ModelBounds          = 0x144; // candidate (3 floats right after world pos)
+    }
+
+    /// <summary>Player component — character name + level. ✓ validated (name StdWString, level byte 27).</summary>
+    public static class PlayerComponent
+    {
+        public const int Name  = 0x1B0; // ✓ StdWString
+        public const int Level = 0x204; // ✓ byte (low byte of a u32 slot)
     }
 
     /// <summary>ObjectMagicProperties component — monster rarity.</summary>

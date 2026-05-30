@@ -87,11 +87,21 @@ public sealed class OverlayRenderer : IDisposable
 
     private void DrawStatus(ID2D1RenderTarget rt, RenderContext ctx)
     {
+        int enemies = 0, uniques = 0, rares = 0;
+        foreach (var e in ctx.Entities)
+            if (e.Category == Poe2Live.EntityCategory.Monster && e.IsAlive)
+            {
+                enemies++;
+                if (e.Rarity == Poe2Live.Rarity.Unique) uniques++;
+                else if (e.Rarity == Poe2Live.Rarity.Rare) rares++;
+            }
+
         var line = !ctx.InGame
             ? "POE2Radar: waiting for in-game…"
-            : $"POE2Radar  HP {ctx.HpPct:F0}%  MP {ctx.ManaPct:F0}%  flask:{ctx.FlaskNote}"
+            : $"POE2Radar  {ctx.AreaCode} (lvl {ctx.CharLevel})  HP {ctx.HpPct:F0}%  MP {ctx.ManaPct:F0}%  "
+              + $"flask:{ctx.FlaskNote}  enemies:{enemies} (R{rares} U{uniques})"
               + (ctx.Map.IsVisible
-                  ? $"  | map zoom={ctx.Map.Zoom:F2} scale={ctx.ScaleMul:F2} off=({ctx.OffsetX:F0},{ctx.OffsetY:F0}) ents={ctx.Entities.Count}"
+                  ? $"  | map zoom={ctx.Map.Zoom:F2} scale={ctx.ScaleMul:F2} off=({ctx.OffsetX:F0},{ctx.OffsetY:F0})"
                   : "");
         rt.FillRectangle(new Vortice.RawRectF(6, 6, 6 + line.Length * 7.3f + 10, 26), _bPanel!);
         rt.DrawText(line, _tf!, new Rect(12, 8, 1200, 22), _bText!, DrawTextOptions.Clip);

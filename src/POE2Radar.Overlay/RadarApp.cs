@@ -50,6 +50,8 @@ public sealed class RadarApp : IDisposable
     private DateTime _nextToggleAt = DateTime.MinValue;
     private float _hpPct = 100f, _manaPct = 100f;
     private string _flaskNote = "";
+    private string _areaCode = "", _charName = "";
+    private int _charLevel;
 
     public void RequestShutdown() => _shutdown = true;
 
@@ -97,6 +99,9 @@ public sealed class RadarApp : IDisposable
 
             player = _live.PlayerGrid(localPlayer) ?? NumVec2.Zero;
             map = _live.ReadMap(inGameState, areaInstance);
+            _areaCode = _live.AreaCode(areaInstance);
+            _charName = _live.PlayerName(localPlayer);
+            _charLevel = _live.PlayerLevel(localPlayer);
             TickAutoFlask(localPlayer);
 
             var now = DateTime.UtcNow;
@@ -110,7 +115,7 @@ public sealed class RadarApp : IDisposable
         }
 
         _state = new RadarState(inGame, _areaHash, areaLevel, map.IsVisible, map.Zoom, player, _entities, _landmarks,
-            _hpPct, _manaPct, _autoFlask, _flaskNote);
+            _hpPct, _manaPct, _autoFlask, _flaskNote, _areaCode, _charName, _charLevel);
 
         var ctx = new RenderContext(
             InGame: inGame,
@@ -128,7 +133,9 @@ public sealed class RadarApp : IDisposable
             OffsetY: _offY,
             HpPct: _hpPct,
             ManaPct: _manaPct,
-            FlaskNote: _flaskNote);
+            FlaskNote: _flaskNote,
+            AreaCode: _areaCode,
+            CharLevel: _charLevel);
         _renderer.Render(ctx);
     }
 

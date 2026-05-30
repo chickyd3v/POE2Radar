@@ -48,6 +48,9 @@ if (HasFlag(args, "--tiles"))
 if (HasFlag(args, "--rarity"))
     return RunRarity(process, reader);
 
+if (HasFlag(args, "--info"))
+    return RunInfo(process, reader);
+
 if (TryGetHexArg(args, "--find") is { } needle)
     return RunFindPointer(reader, needle, TryGetHexArg(args, "--near"), TryGetIntArg(args, "--window") ?? 0x2000);
 
@@ -177,6 +180,51 @@ static int RunFindPointer(MemoryReader reader, nint needle, nint? near, int wind
         }
     }
     Console.WriteLine($"{hits} hit(s){(hits >= 60 ? " (capped)" : "")}.");
+    return 0;
+}
+
+// ── Info: validate the community-note fields reachable from town — area name, character
+// name/level, camera/zoom — and dump the camera object so the WorldToScreen matrix can be found.
+static int RunInfo(ProcessHandle process, MemoryReader reader)
+{
+    var (igs, _, ai, lp) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+    Console.WriteLine($"InGameState 0x{igs:X}  AreaInstance 0x{ai:X}  LocalPlayer 0x{lp:X}");
+
+    // Area name: AreaInstance+0xA0 -> AreaInfo -> +0x00 -> UTF-16 "Code\0Name\0".
+    var areaInfo = SafePtr(reader, ai + 0xA0);
+    var strPtr = SafePtr(reader, areaInfo);
+    var code = reader.ReadStringUtf16(strPtr, 64);
+    var name = code.Length > 0 ? reader.ReadStringUtf16(strPtr + (nint)((code.Length + 1) * 2), 64) : "";
+    Console.WriteLine($"AreaInfo 0x{areaInfo:X}  Code='{code}'  Name='{name}'");
+
+    // Character: try the Player component, then a 'Character' component if present.
+    foreach (var compName in new[] { "Player", "Character", "PlayerClass" })
+    {
+        var c = ResolveComponentAddr(reader, lp, compName);
+        if (c == 0) continue;
+        var nm0x1B0 = reader.ReadStringUtf16(c + 0x1B0, 32);
+        var nmStd = ReadStdWString(reader, c + 0x1B0);
+        reader.TryReadStruct<int>(c + 0x204, out var lvl204);
+        reader.TryReadStruct<byte>(c + 0x204, out var lvlByte);
+        Console.WriteLine($"  [{compName}] @0x{c:X}  name@0x1B0(raw)='{nm0x1B0}' (std)='{nmStd}'  lvl@0x204 int={lvl204} byte={lvlByte}");
+    }
+
+    // Camera: InGameState+0x368 -> Camera; Zoom @ +0x528. Dump +0x000..+0x160 to spot the 4x4 matrix.
+    var cam = SafePtr(reader, igs + 0x368);
+    Console.WriteLine($"Camera 0x{cam:X}");
+    if (cam != 0)
+    {
+        reader.TryReadStruct<float>(cam + 0x528, out var zoom);
+        Console.WriteLine($"  Zoom@0x528 = {zoom}");
+        var buf = new byte[0x160];
+        if (reader.TryReadBytes(cam, buf) == buf.Length)
+            for (var i = 0; i < buf.Length; i += 16)
+            {
+                var f = string.Join(" ", Enumerable.Range(0, 4).Select(j => BitConverter.ToSingle(buf, i + j * 4).ToString("0.###")));
+                Console.WriteLine($"  +0x{i:X3}  {f}");
+            }
+    }
     return 0;
 }
 
