@@ -54,6 +54,15 @@ if (HasFlag(args, "--info"))
 if (HasFlag(args, "--camera"))
     return RunCamera(process, reader);
 
+if (TryGetHexArg(args, "--serverdata-vec") is { } vecOff)
+    return RunServerDataVec(process, reader, (int)vecOff);
+
+if (HasFlag(args, "--serverdata-diff"))
+    return RunServerDataDiff(process, reader);
+
+if (HasFlag(args, "--serverdata"))
+    return RunServerData(process, reader);
+
 if (TryGetHexArg(args, "--find") is { } needle)
     return RunFindPointer(reader, needle, TryGetHexArg(args, "--near"), TryGetIntArg(args, "--window") ?? 0x2000);
 
@@ -72,8 +81,167 @@ Console.WriteLine("  --hp <N> [--mana <N>]      value-scan for the player Life c
 Console.WriteLine("  --dump <hexAddr> [--dump-len <N>]   hex-dump a region for inspection");
 Console.WriteLine("  --dump <hexAddr> [--dump-len <N>]   hex-dump a region for inspection");
 Console.WriteLine("  --entity <hexAddr>         walk a PoE2 entity: id, metadata path, component map, Render→grid, Life");
+Console.WriteLine("  --serverdata               dump ServerData (AreaInstance+0x580): strings + StdVector quest-list candidates");
 Console.WriteLine("  --aob                      scan for IngameState via AOB patterns");
 return 0;
+
+// ── ServerData probe — locate the quest-state container ────────────────────
+// AreaInstance+0x580 is the PlayerInfo/LocalPlayerStruct base (+0x00 ServerDataPtr,
+// +0x20 LocalPlayerPtr). LocalPlayer @ AreaInstance+0x5A0 (= base+0x20) is validated, so the
+// +0x580 deref is the ServerData object. In PoE1 GameHelper, ServerData holds the quest-states
+// list (among league/guild/passives). This surfaces ServerData's strings (to confirm identity)
+// and its StdVector-shaped fields (quest-list candidates), and writes the raw region to a temp
+// file so two runs (before/after advancing a quest) can be byte-diffed to pinpoint quest flags.
+//
+// FINDINGS (2026-05-31, PAUSED mid-decode — resume here):
+//   • ServerData = *(AreaInstance+0x580) CONFIRMED — its +0x20 equals the validated LocalPlayer
+//     (AreaInstance+0x5A0), so the PlayerInfo shape holds.
+//   • Clean before/after-quest diffs (delta 0, no zone change) RULED OUT two volatile candidates:
+//     +0x22D0 (an int that drifts up AND down between reads) and the +0x23C8 StdVector (reallocates
+//     constantly; grew 27→204 across a zone — content/area-dependent, NOT a stable quest list).
+//   • LEAD: a block-structured region (vectors repeat every ~0x238 from ~+0x3030). Completing
+//     "Trail of Corruption" flipped 16 dwords in +0x3434..+0x3B48 from 0 → 0xB4000000
+//     (stable→sentinel = quest-state-like). "Lost Lute" only churned the volatile fields, so the
+//     per-quest field mapping is NOT pinned yet, and 0xB4000000's meaning is unknown.
+//   • NEXT: (1) control diff with NO quest action to confirm +0x34xx is quest-only; (2) decode
+//     several quests to map field→quest + the sentinel semantics; (3) curate quest→objective-area
+//     to drive auto-nav. Tools: --serverdata (baseline), --serverdata-diff, --serverdata-vec <off>.
+static int RunServerData(ProcessHandle process, MemoryReader reader)
+{
+    var (_, _, ai, _) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var playerInfo = ai + 0x580;
+    var serverData = SafePtr(reader, playerInfo);
+    var localPlayer = SafePtr(reader, playerInfo + 0x20);
+    var validatedPlayer = SafePtr(reader, ai + 0x5A0);
+    Console.WriteLine($"AreaInstance 0x{ai:X}  PlayerInfo(+0x580) 0x{playerInfo:X}");
+    Console.WriteLine($"  ServerDataPtr (+0x00) -> 0x{serverData:X}");
+    Console.WriteLine($"  LocalPlayerPtr(+0x20) -> 0x{localPlayer:X}   (AreaInstance+0x5A0 = 0x{validatedPlayer:X}, {(localPlayer == validatedPlayer && localPlayer != 0 ? "MATCH" : "mismatch")})");
+    if (serverData == 0) { Console.Error.WriteLine("ServerData null — wrong offset or not in game."); return 1; }
+
+    const int scan = 0x4000;
+    var buf = new byte[scan];
+    var got = reader.TryReadBytes(serverData, buf);
+    Console.WriteLine($"  read {got} bytes of ServerData @ 0x{serverData:X}");
+
+    Console.WriteLine("\n--- ASCII-ish StdWString fields (+0x000..+0x1000) — expect league / character / guild ---");
+    for (var off = 0; off <= 0x1000; off += 8)
+    {
+        var s = ReadStdWString(reader, serverData + off);
+        if (!string.IsNullOrEmpty(s) && s.Length is >= 2 and <= 48 && s.All(c => c is >= (char)0x20 and < (char)0x7f))
+            Console.WriteLine($"  +0x{off:X3}: \"{s}\"");
+    }
+
+    Console.WriteLine("\n--- StdVector-shaped fields (First<=Last<=Cap, plausible heap) — quest-list candidates ---");
+    for (var off = 0; off + 24 <= got; off += 8)
+    {
+        var first = BitConverter.ToInt64(buf, off);
+        var last  = BitConverter.ToInt64(buf, off + 8);
+        var cap   = BitConverter.ToInt64(buf, off + 16);
+        if (first <= 0x10000 || last < first || cap < last) continue;
+        if ((ulong)first > 0x7FFFFFFFFFFF || (ulong)cap > 0x7FFFFFFFFFFF) continue;
+        var span = last - first;
+        if (span <= 0 || span > 0x80000) continue;
+        Console.WriteLine($"  +0x{off:X3}: n8={span / 8} n16={span / 16} n24={span / 24} n40={span / 40}  (span 0x{span:X}) first=0x{first:X}");
+    }
+
+    var snap = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "poe2_serverdata.bin");
+    try
+    {
+        // Prepend the 8-byte base address so the diff can be relocation-aware: ServerData moves
+        // across zones, after which its internal pointers shift by a constant base delta we filter.
+        using var fs = System.IO.File.Create(snap);
+        fs.Write(BitConverter.GetBytes((long)serverData));
+        fs.Write(buf, 0, Math.Min(got, scan));
+        Console.WriteLine($"\nSnapshot written: {snap} (base 0x{serverData:X} + {Math.Min(got, scan)} bytes)");
+    }
+    catch (Exception ex) { Console.WriteLine($"\n(snapshot write failed: {ex.Message})"); }
+
+    Console.WriteLine("Quest-flag hunt: run --serverdata (baseline), advance ONE quest step in-game,");
+    Console.WriteLine("then run --serverdata-diff to print exactly which offsets changed.");
+    return 0;
+}
+
+// ── Inspect a StdVector inside ServerData (e.g. the quest-states vector at +0x23C8) ──
+// Walks the vector as 8-byte elements; for each element that's a heap pointer, dumps the target's
+// first qwords and tries to read a string at the target + a few inner offsets, to surface quest
+// id/name and the per-entry layout (so we can key auto-nav on quest state).
+static int RunServerDataVec(ProcessHandle process, MemoryReader reader, int off)
+{
+    var (_, _, ai, _) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+    var sd = SafePtr(reader, ai + 0x580);
+    if (sd == 0) { Console.Error.WriteLine("ServerData null."); return 1; }
+
+    var vec = reader.ReadStruct<POE2Radar.Core.Game.StdVector>(sd + off);
+    var span = (long)vec.Last - (long)vec.First;
+    Console.WriteLine($"ServerData 0x{sd:X}  +0x{off:X}: First=0x{vec.First:X} Last=0x{vec.Last:X} span=0x{span:X}  (n8={span/8} n16={span/16} n24={span/24})");
+    if (vec.First == 0 || span <= 0 || span > 0x80000) { Console.Error.WriteLine("implausible vector"); return 1; }
+
+    var count = span / 8;
+    for (long i = 0; i < Math.Min(count, 60); i++)
+    {
+        var p = reader.ReadPointer(vec.First + (nint)(i * 8));
+        if (p <= 0x10000 || (ulong)p >= 0x7FFF_FFFFFFFF) { Console.WriteLine($"  [{i,2}] 0x{p:X}"); continue; }
+        reader.TryReadStruct<int>(p + 0x18, out var s18);
+        reader.TryReadStruct<int>(p + 0x20, out var s20);
+        var def = reader.ReadPointer(p + 0x08); // quest definition (dat row) — should carry id/name
+        Console.Write($"  [{i,2}] obj=0x{p:X} def=0x{def:X} s[+18]={s18} s[+20]={s20}");
+        if (def > 0x10000 && (ulong)def < 0x7FFF_FFFFFFFF)
+            foreach (var so in new[] { 0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30 })
+            {
+                var w = ReadStdWString(reader, def + so);
+                if (Printable(w)) { Console.Write($"  +{so:X}=\"{w}\""); continue; }
+                var pp = reader.ReadPointer(def + so);
+                if (pp > 0x10000 && (ulong)pp < 0x7FFF_FFFFFFFF) { var u = reader.ReadStringUtf8(pp, 64); if (Printable(u)) Console.Write($"  +{so:X}->\"{u}\""); }
+            }
+        Console.WriteLine();
+    }
+    return 0;
+}
+
+static bool Printable(string? s) => !string.IsNullOrWhiteSpace(s) && s.Length >= 3 && s.All(c => c >= ' ' && c < (char)0x7f);
+
+// ── ServerData diff — compare current ServerData to the last --serverdata baseline ──
+// ServerData is mostly static character/account data, so between two runs with NO quest change
+// the diff should be ~empty. Advance one quest step and the changed dword(s) are the quest state.
+static int RunServerDataDiff(ProcessHandle process, MemoryReader reader)
+{
+    var snap = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "poe2_serverdata.bin");
+    if (!System.IO.File.Exists(snap)) { Console.Error.WriteLine("No baseline — run --serverdata first."); return 1; }
+    var raw = System.IO.File.ReadAllBytes(snap);
+    if (raw.Length < 16) { Console.Error.WriteLine("Baseline too small / stale — re-run --serverdata."); return 1; }
+    var oldBase = BitConverter.ToInt64(raw, 0);
+    var baseline = raw[8..];
+
+    var (_, _, ai, _) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+    var serverData = SafePtr(reader, ai + 0x580);
+    if (serverData == 0) { Console.Error.WriteLine("ServerData null."); return 1; }
+
+    var cur = new byte[baseline.Length];
+    var got = reader.TryReadBytes(serverData, cur);
+    var n = Math.Min(got, baseline.Length);
+    var delta = unchecked((uint)((long)serverData - oldBase)); // base relocation, low 32 bits
+    Console.WriteLine($"ServerData base 0x{oldBase:X} -> 0x{serverData:X} (delta 0x{delta:X}); diffing {n} bytes");
+    Console.WriteLine("(filtered: pointers shifted by the base delta, and pointer/float churn — small-int quest flags remain)");
+
+    var changes = 0; var filtered = 0;
+    for (var off = 0; off + 4 <= n; off += 4)
+    {
+        var b = BitConverter.ToUInt32(baseline, off);
+        var c = BitConverter.ToUInt32(cur, off);
+        if (b == c) continue;
+        if (unchecked(c - b) == delta) { filtered++; continue; }                 // relocated internal pointer
+        if (b >= 0x0010_0000u && c >= 0x0010_0000u) { filtered++; continue; }     // pointer/float churn, not a small flag
+        Console.WriteLine($"  +0x{off:X4}: 0x{b:X8} -> 0x{c:X8}   ({(int)b} -> {(int)c})");
+        changes++;
+    }
+    Console.WriteLine($"{changes} candidate changed dwords ({filtered} pointer/relocation changes filtered).");
+    Console.WriteLine("For a clean read: flip ONE quest with minimal zoning between baseline and diff.");
+    return 0;
+}
 
 // ── PoE2 entity / component-map probe ──────────────────────────────────────
 // Validates the GameHelper2 PoE2 layout: Entity{Id@0x80, IsValid@0x84, ItemBase{
