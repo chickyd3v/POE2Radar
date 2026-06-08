@@ -56,6 +56,8 @@ public sealed class ApiServer : IDisposable
     private readonly Action<IReadOnlyList<long>>? _atlasSelect;
     // Atlas highlight rules (tag + colour + track/arrow) — only matching nodes draw in-game; loopback-gated.
     private readonly Action<IReadOnlyList<(string tag, string color, bool track, bool arrow)>>? _atlasHighlight;
+    // Version/update info provider ({current, latest, updateAvailable, url}) for the dashboard banner.
+    private readonly Func<object>? _version;
     private volatile bool _running;
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -73,12 +75,14 @@ public sealed class ApiServer : IDisposable
         Func<object>? atlasProvider = null,
         Action<IReadOnlyList<long>>? atlasSelect = null,
         Action<IReadOnlyList<(string tag, string color, bool track, bool arrow)>>? atlasHighlight = null,
+        Func<object>? versionProvider = null,
         int port = 7777)
     {
         _state = state;
         _atlas = atlasProvider;
         _atlasSelect = atlasSelect;
         _atlasHighlight = atlasHighlight;
+        _version = versionProvider;
         _settings = settings;
         _navGet = navGet;
         _navToggle = navToggle;
@@ -300,6 +304,11 @@ public sealed class ApiServer : IDisposable
                 // Distinct terrain-tile paths in the current area — the add-rule picker browses these
                 // so a Tile rule can target any tile. Read-only.
                 Write(ctx, 200, JsonSerializer.Serialize(new { tiles = _tiles() }, Json));
+                break;
+
+            case "/api/version":
+                // This build's version + latest known on GitHub + download URL (for the update banner).
+                Write(ctx, 200, JsonSerializer.Serialize(_version?.Invoke() ?? new { current = "?", latest = (string?)null, updateAvailable = false, url = "" }, Json));
                 break;
 
             case "/api/atlas":

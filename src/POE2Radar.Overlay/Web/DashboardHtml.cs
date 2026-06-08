@@ -338,6 +338,10 @@ internal static class DashboardHtml
 </style>
 </head>
 <body>
+<a id="updateBanner" href="#" target="_blank" rel="noopener" hidden
+   style="display:none;align-items:center;gap:10px;padding:9px 16px;margin:0;background:#e0b341;color:#1a1400;font-weight:600;text-decoration:none">
+  <span>&#x2B06; Update available</span><span id="updateMsg" style="font-weight:400"></span><span style="margin-left:auto;text-decoration:underline">Download &rarr;</span>
+</a>
 <div class="shell">
   <header>
     <div class="mark">
@@ -447,7 +451,7 @@ internal static class DashboardHtml
             </div>
             <div class="row" style="margin:0 0 10px;flex-direction:column;align-items:stretch;gap:6px">
               <div class="controls" style="gap:8px;align-items:center">
-                <span class="hint-row" style="flex:1"><b id="atlasHlCount">0 active</b> &mdash; click rows to toggle, sort by any column.</span>
+                <span class="hint-row" style="flex:1"><b id="atlasHlCount">0 active</b> &mdash; click a row to <b>Track</b> (ring it in-game); click the <b style="color:#e0b341">&#10148;</b> to <b>Arrow</b> (point to it from the screen edge when off-screen). Track without Arrow = highlight only, no arrow.</span>
                 <input type="search" id="atlasHlFilter" placeholder="search filters&hellip;" style="width:200px">
                 <button class="chip" id="atlasHlSelOnly">Selected</button>
                 <button class="chip" id="atlasHlClear">Clear</button>
@@ -1073,16 +1077,16 @@ function renderAtlasHighlight(d){
   const sa=key=> atlasHlSort.key===key ? (atlasHlSort.dir<0?' ▼':' ▲') : '';
   const cell='display:grid;grid-template-columns:30px 34px 1fr 50px 90px;gap:8px;align-items:center;padding:5px 9px';
   let html='<div style="'+cell+';position:sticky;top:0;background:var(--panel,#1a1a1a);border-bottom:1px solid var(--line);font-weight:600;font-size:11px;text-transform:uppercase;opacity:.75">'
-    +'<span title="Track: ring the map in-game">Trk</span>'
-    +'<span title="Arrow: edge arrow toward it when off-screen">Arw</span>'
+    +'<span title="Track: ring the map in-game">&#9745;</span>'
+    +'<span title="Arrow: edge arrow toward it when off-screen">&#10148;</span>'
     +'<span data-sort="title" style="cursor:pointer">Title'+sa('title')+'</span>'
     +'<span data-sort="count" style="cursor:pointer;text-align:right">Count'+sa('count')+'</span>'
     +'<span data-sort="cat" style="cursor:pointer">Category'+sa('cat')+'</span></div>';
   html+=rows.map(r=>{
     const key=r.title.toLowerCase(); const trk=atlasHl.has(key), arw=atlasArrow.has(key);
     return '<div class="hlrow" data-tag="'+esc(r.title)+'" style="'+cell+';cursor:pointer;border-bottom:1px solid var(--line)'+((trk||arw)?';background:rgba(60,160,255,.14)':'')+'">'
-      +'<span style="font-size:14px">'+(trk?'☑':'☐')+'</span>'
-      +'<span class="hlarw" data-tag="'+esc(r.title)+'" title="toggle off-screen arrow" style="font-size:14px;cursor:pointer;'+(arw?'opacity:1':'opacity:.28')+'">➤</span>'
+      +'<span style="font-size:15px">'+(trk?'☑':'☐')+'</span>'
+      +'<span class="hlarw" data-tag="'+esc(r.title)+'" title="toggle off-screen arrow" style="font-size:15px;cursor:pointer;color:'+(arw?'#e0b341':'#4a525c')+'">➤</span>'
       +'<span title="'+esc(r.title)+'">'+esc(r.title)+'</span>'
       +'<span class="amono" style="text-align:right">'+r.count+'</span>'
       +'<span>'+catBadge(r.cat)+'</span></div>';
@@ -1183,9 +1187,22 @@ function renderState(){
   } else { zn.hidden=true; }
 }
 
+// Update banner: show a download link if a newer version exists on GitHub (best-effort).
+async function checkVersion(){
+  try{
+    const v=await getJSON('/api/version');
+    if(v && v.updateAvailable){
+      const b=$('#updateBanner'); if(!b) return;
+      const m=$('#updateMsg'); if(m) m.textContent=' — '+(v.latest||'')+' (you have v'+(v.current||'?')+')';
+      b.href=v.url||'#'; b.hidden=false; b.style.display='flex';
+    }
+  }catch(e){}
+}
+
 wireSettings(); wireHpBars(); wireTerrain();
 loadIcons().then(()=>{ loadSettings(); loadFilters(); }); // Rules is the default tab
 tick(); setInterval(tick, 1000);
+checkVersion();
 </script>
 </body>
 </html>

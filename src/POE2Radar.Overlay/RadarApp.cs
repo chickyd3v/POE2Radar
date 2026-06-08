@@ -56,6 +56,7 @@ public sealed class RadarApp : IDisposable
     // transform's linear part scales by liveZoom/calibZoom each frame: screen = (UIscale×zoom)·relPos +
     // offset, and relPos is read live, so this tracks pan (relPos) AND zoom (this ratio) automatically.
     private volatile float _atlasZoom = 0.85f;
+    private volatile UpdateChecker.Result? _update;   // GitHub version check (best-effort, set async at startup)
     // Pre-first-calibration pick fallback. Scale ≈ UIscale×zoom (measured ~0.572 = 0.675@1080p × 0.85 zoom),
     // uniform in x/y; offset is small + pan-invariant (pan lives in relPos). Only used until the first solve.
     private static readonly double[] RoughAtlas = { 0.572, 0, 15, 0, 0.572, 13, 0, 0 }; // h0,h1,h2,h3,h4,h5,h6,h7
@@ -219,11 +220,35 @@ public sealed class RadarApp : IDisposable
         Console.WriteLine($"Hidden entities: {_hidden.Count} pattern(s); display rules: {_displayRules.Count}");
         _api = new ApiServer(() => _state, _settings, GetNavSelection, ToggleNavTarget, ClearNavSelection,
                              _hidden, _displayRules, _landmarkStore, CurrentTilePaths, AtlasJson, SetAtlasSelection,
-                             SetAtlasHighlight, _settings.ApiPort);
+                             SetAtlasHighlight, VersionJson, _settings.ApiPort);
         try { _api.Start(); Console.WriteLine($"API on http://localhost:{_settings.ApiPort} (dashboard at /)"); }
         catch (Exception ex) { Console.Error.WriteLine($"API server disabled: {ex.Message}"); }
         Console.WriteLine("Hotkeys: F6=add nearest path target  F7=clear path targets  "
                           + "F8=auto-flask  F9=quit  F12=open dashboard");
+        // Best-effort version check against GitHub (non-blocking; never fails startup).
+        _ = Task.Run(async () =>
+        {
+            var u = await UpdateChecker.CheckAsync();
+            _update = u;
+            if (u.UpdateAvailable)
+                Console.WriteLine($"\n*** UPDATE AVAILABLE: {u.Latest} — you have v{u.Current}. Download: {u.Url} ***\n");
+            else
+                Console.WriteLine($"POE2Radar v{u.Current}" + (u.Latest != null ? " (up to date)." : " (update check unavailable)."));
+        });
+    }
+
+    /// <summary>API (/api/version): this build's version + the latest known on GitHub + a download URL.
+    /// Lets the dashboard show an "update available" banner. Null-ish until the async check completes.</summary>
+    private object VersionJson()
+    {
+        var u = _update;
+        return new
+        {
+            current = u?.Current ?? UpdateChecker.Current,
+            latest = u?.Latest,
+            updateAvailable = u?.UpdateAvailable ?? false,
+            url = u?.Url ?? UpdateChecker.ReleasesPage,
+        };
     }
 
     public void Run()
