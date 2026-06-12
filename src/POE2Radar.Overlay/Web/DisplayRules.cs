@@ -22,6 +22,7 @@ public sealed class DisplayRule
     // ── Matcher (unset = "any") ──
     public List<string> Categories { get; set; } = new();   // EntityCategory names; empty = any
     public List<string> Match { get; set; } = new();        // metadata terms (substring, or glob if it has * / ?); ANY-of; empty = any
+    public List<string> Mods { get; set; } = new();         // monster affix-mod terms (e.g. "Aura"); ANY-of vs the entity's mod ids; empty = any
     public string? Rarity { get; set; }                     // Normal | Magic | Rare | Unique
     public string? Reaction { get; set; }                   // Hostile | Friendly
     public string? Life { get; set; }                       // Alive | Dead
@@ -283,6 +284,7 @@ public sealed class DisplayRules
         private readonly bool _anyCat;
         private readonly bool[] _catMask = new bool[7];    // EntityCategory has 7 members (Player..Other)
         private readonly (string sub, Regex? glob)[]? _match; // null = any
+        private readonly (string sub, Regex? glob)[]? _mods;  // null = any (matched vs the entity's mod-id list)
         private readonly bool _anyRarity;                  // true = no rarity filter
         private readonly Poe2Live.Rarity _rarity;          // matched rarity enum (sentinel if unparseable → never matches)
         private readonly int _reaction, _life, _chest, _poi, _enc; // 0 any / 1 / 2
@@ -301,6 +303,9 @@ public sealed class DisplayRules
             _match = r.Match is { Count: > 0 }
                 ? r.Match.Where(m => !string.IsNullOrEmpty(m)).Select(CompileTerm).ToArray() : null;
             if (_match is { Length: 0 }) _match = null;
+            _mods = r.Mods is { Count: > 0 }
+                ? r.Mods.Where(m => !string.IsNullOrEmpty(m)).Select(CompileTerm).ToArray() : null;
+            if (_mods is { Length: 0 }) _mods = null;
             _anyRarity = string.IsNullOrEmpty(r.Rarity);
             _rarity = _anyRarity ? default
                 : Enum.TryParse<Poe2Live.Rarity>(r.Rarity, ignoreCase: true, out var rr) ? rr : (Poe2Live.Rarity)int.MaxValue;
@@ -316,6 +321,7 @@ public sealed class DisplayRules
             if (!_enabled) return false;
             if (!_anyCat) { var ci = (int)e.Category; if ((uint)ci >= (uint)_catMask.Length || !_catMask[ci]) return false; }
             if (_match != null && !AnyMatch(e.Metadata)) return false;
+            if (_mods != null && !AnyMatchMods(e.Mods)) return false;
             if (!_anyRarity && e.Rarity != _rarity) return false;
             if (_reaction == 1 && !e.IsFriendly) return false;
             if (_reaction == 2 && e.IsFriendly) return false;
@@ -344,6 +350,21 @@ public sealed class DisplayRules
                 if (glob != null) { if (glob.IsMatch(metadata)) return true; }
                 else if (metadata.Contains(sub, StringComparison.OrdinalIgnoreCase)) return true;
             }
+            return false;
+        }
+
+        /// <summary>True if any of this rule's mod terms matches any of the entity's mod ids (substring or
+        /// glob). Allocation-free hot path: no LINQ, null/empty list short-circuits.</summary>
+        private bool AnyMatchMods(IReadOnlyList<string>? mods)
+        {
+            if (mods is not { Count: > 0 }) return false;
+            foreach (var (sub, glob) in _mods!)
+                for (var i = 0; i < mods.Count; i++)
+                {
+                    var m = mods[i];
+                    if (glob != null) { if (glob.IsMatch(m)) return true; }
+                    else if (m.Contains(sub, StringComparison.OrdinalIgnoreCase)) return true;
+                }
             return false;
         }
 

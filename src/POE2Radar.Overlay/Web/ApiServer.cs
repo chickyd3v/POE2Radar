@@ -49,6 +49,9 @@ public sealed class ApiServer : IDisposable
     private readonly DisplayRules _displayRules;
     private readonly LandmarkStore _landmarkStore;
     private readonly Func<IReadOnlyList<string>> _tiles;
+    // Persistent catalog of every monster affix-mod id ever seen — the vocabulary the rule editor
+    // browses to author a Mods matcher. Read-only provider supplied by RadarApp.
+    private readonly Func<IReadOnlyList<string>> _knownMods;
     // Atlas map-data provider (catalog + current-region map set). Read-only, computed on demand (it
     // scans memory + caches), returns a JSON-ready object. Null when atlas reading is unavailable.
     private readonly Func<object>? _atlas;
@@ -72,6 +75,7 @@ public sealed class ApiServer : IDisposable
         DisplayRules displayRules,
         LandmarkStore landmarkStore,
         Func<IReadOnlyList<string>> tilesProvider,
+        Func<IReadOnlyList<string>> knownModsProvider,
         Func<object>? atlasProvider = null,
         Action<IReadOnlyList<long>>? atlasSelect = null,
         Action<IReadOnlyList<(string tag, string color, bool track, bool arrow)>>? atlasHighlight = null,
@@ -91,6 +95,7 @@ public sealed class ApiServer : IDisposable
         _displayRules = displayRules;
         _landmarkStore = landmarkStore;
         _tiles = tilesProvider;
+        _knownMods = knownModsProvider;
         _listener.Prefixes.Add($"http://localhost:{port}/");
     }
 
@@ -195,6 +200,7 @@ public sealed class ApiServer : IDisposable
                         id = e.Id, addr = $"0x{e.Address:X}", category = e.Category.ToString(), metadata = e.Metadata,
                         name = EntityNameResolver.Shared.ResolveOrShorten(e.Metadata),
                         poi = e.Poi, iconComplete = e.IconComplete, opened = e.Opened, reaction = e.Reaction, friendly = e.IsFriendly, rarity = e.Rarity.ToString(),
+                        mods = e.ModList,
                         x = e.Grid.X, y = e.Grid.Y, hpCur = e.HpCur, hpMax = e.HpMax,
                         alive = e.HpMax <= 0 || e.HpCur > 0,
                         dist = (int)Dist(e.Grid, s.Player),
@@ -304,6 +310,12 @@ public sealed class ApiServer : IDisposable
                 // Distinct terrain-tile paths in the current area — the add-rule picker browses these
                 // so a Tile rule can target any tile. Read-only.
                 Write(ctx, 200, JsonSerializer.Serialize(new { tiles = _tiles() }, Json));
+                break;
+
+            case "/api/mods":
+                // Every monster affix-mod id ever seen (persistent catalog) — the add-rule picker browses
+                // these so a Mods matcher can target any known aura/buff. Read-only.
+                Write(ctx, 200, JsonSerializer.Serialize(new { mods = _knownMods() }, Json));
                 break;
 
             case "/api/version":

@@ -58,6 +58,9 @@ if (HasFlag(args, "--tiles"))
 if (HasFlag(args, "--rarity"))
     return RunRarity(process, reader);
 
+if (HasFlag(args, "--mods"))
+    return RunMods(process, reader, TryGetIntArg(args, "--min") ?? 1, TryGetIntArg(args, "--max") ?? 12);
+
 if (HasFlag(args, "--validate"))
     return RunValidate(process, reader, TryGetIntArg(args, "--n") ?? 6);
 
@@ -1039,6 +1042,145 @@ static int RunRarity(ProcessHandle process, MemoryReader reader)
     foreach (var (o, set) in perOffset.OrderBy(k => k.Key))
         if (set.Count >= 3 && set.All(v => v is >= 0 and <= 6))
             Console.WriteLine($"  +0x{o:X3}: values {{{string.Join(",", set.OrderBy(x => x))}}}");
+    return 0;
+}
+
+// ── Mods: read the monster modifier id strings out of ObjectMagicProperties ────────────────
+// The affix-vector offset inside OMP is not in the validated table and drifts with patches, so
+// this probe (a) tests the seed layouts ported from the Auras plugin (rarity mods @+0x150,
+// affixes @+0x168; elem 0x20, ptr@+0x8, id at record+0x0) and (b) brute-force discovers any
+// vector in the first 0x300 bytes whose elements lead to mod-id-looking UTF-16 strings. Run it
+// with a few Magic/Rare/Unique monsters on screen; the goal is to lock the affix offset so the
+// overlay can read it from Poe2Offsets instead of brute-forcing at runtime.
+static bool ModIsPtr(nint p) => (ulong)p > 0x10000 && (ulong)p < 0x7FFF_FFFF_0000;
+
+static string? ModTryName(MemoryReader reader, nint strPtr)
+{
+    if (!ModIsPtr(strPtr)) return null;
+    string s;
+    try { s = reader.ReadStringUtf16(strPtr, 64); } catch { return null; }
+    if (s.Length is < 3 or > 64) return null;
+    var hasLetter = false;
+    foreach (var c in s)
+    {
+        if (c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z')) { hasLetter = true; continue; }
+        if (c is (>= '0' and <= '9') or '_') continue;
+        return null;
+    }
+    return hasLetter ? s : null;
+}
+
+static List<string> ModReadNames(MemoryReader reader, nint comp, VecLayout l)
+{
+    var res = new List<string>();
+    if (comp == 0 || !reader.TryReadStruct<POE2Radar.Core.Game.StdVector>(comp + l.VecOff, out var v)) return res;
+    var len = (long)v.Last - (long)v.First;
+    if (!ModIsPtr(v.First) || len <= 0 || len > 0x4000 || len % l.ElemSize != 0) return res;
+    var n = (int)(len / l.ElemSize);
+    if (n > 100) return res;
+    for (var i = 0; i < n; i++)
+    {
+        var p = SafePtr(reader, v.First + (nint)(i * l.ElemSize + l.SlotA));
+        if (!ModIsPtr(p)) continue;
+        var q = l.SlotB < 0 ? p : SafePtr(reader, p + l.SlotB);
+        var s = ModTryName(reader, q);
+        if (s != null && !res.Contains(s)) res.Add(s);
+    }
+    return res;
+}
+
+static List<(VecLayout Layout, List<string> Names)> ModDiscover(MemoryReader reader, nint comp)
+{
+    var found = new List<(VecLayout, List<string>)>();
+    if (comp == 0) return found;
+    int[] elemSizes = [8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40];
+    int[] slotBs = [-1, 0x0, 0x8, 0x10, 0x18];
+    for (var off = 0x10; off <= 0x2F8; off += 8)
+    {
+        if (!reader.TryReadStruct<POE2Radar.Core.Game.StdVector>(comp + off, out var v)) continue;
+        var len = (long)v.Last - (long)v.First;
+        if (!ModIsPtr(v.First) || len < 8 || len > 0x4000) continue;
+        if ((long)v.End < (long)v.Last) continue;
+
+        (VecLayout, List<string>)? bestHere = null;
+        foreach (var es in elemSizes)
+        {
+            if (len % es != 0) continue;
+            var n = (int)(len / es);
+            if (n is < 1 or > 100) continue;
+            for (var slotA = 0; slotA + 8 <= es; slotA += 8)
+                foreach (var slotB in slotBs)
+                {
+                    var l = new VecLayout(off, es, slotA, slotB);
+                    var names = ModReadNames(reader, comp, l);
+                    if (names.Count < 1 || names.Count * 2 < n) continue;
+                    if (!names.Any(s => s[0] is >= 'A' and <= 'Z' && s.Any(c => c is >= 'a' and <= 'z'))) continue;
+                    if (bestHere == null || names.Count > bestHere.Value.Item2.Count) bestHere = (l, names);
+                }
+        }
+        if (bestHere != null) found.Add(bestHere.Value);
+    }
+    return found;
+}
+
+static int RunMods(ProcessHandle process, MemoryReader reader, int minRarity, int maxMonsters)
+{
+    var (_, _, ai, _) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var head = SafePtr(reader, ai + Poe2.AreaInstance.AwakeEntities);
+    if (head == 0) { Console.Error.WriteLine("no awake entities"); return 1; }
+
+    VecLayout[] seeds = [new(0x150, 0x20, 0x8, 0x0), new(0x168, 0x20, 0x8, 0x0)];
+    Console.WriteLine($"--mods: minRarity={minRarity} (0 Normal/1 Magic/2 Rare/3 Unique), up to {maxMonsters} monsters.");
+    Console.WriteLine($"seed layouts: {string.Join("  ", seeds.Select(s => $"+0x{s.VecOff:X}(es 0x{s.ElemSize:X},a 0x{s.SlotA:X},b 0x{s.SlotB:X})"))}\n");
+
+    var queue = new Queue<nint>(); queue.Enqueue(SafePtr(reader, head + Poe2.StdMapNode.Parent));
+    var visited = new HashSet<nint>();
+    var seedHits = new Dictionary<int, int>();   // VecOff → monsters where seed layout yielded names
+    var discHits = new Dictionary<int, int>();    // VecOff → monsters where discovery yielded names
+    var shown = 0;
+
+    while (queue.Count > 0 && visited.Count < 200000 && shown < maxMonsters)
+    {
+        var node = queue.Dequeue();
+        if (node == 0 || node == head || !visited.Add(node)) continue;
+        if (!reader.TryReadStruct<byte>(node + Poe2.StdMapNode.IsNil, out var nil) || nil != 0) continue;
+        var entity = SafePtr(reader, node + Poe2.StdMapNode.ValueEntityPtr);
+        reader.TryReadStruct<uint>(node + Poe2.StdMapNode.KeyId, out var id);
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Left));
+        queue.Enqueue(SafePtr(reader, node + Poe2.StdMapNode.Right));
+        if (entity == 0 || id >= Poe2.EntityList.VisualIdThreshold) continue;
+
+        var meta = ReadEntityMetadata(reader, entity);
+        if (!meta.Contains("/Monsters/", StringComparison.Ordinal)) continue;
+
+        var omp = ResolveComponentAddr(reader, entity, "ObjectMagicProperties");
+        if (omp == 0) continue;
+        if (!reader.TryReadStruct<int>(omp + Poe2.ObjectMagicProperties.Rarity, out var rarity)) continue;
+        if (rarity < minRarity) continue;
+
+        shown++;
+        var shortMeta = meta.Contains("/Monsters/") ? meta[(meta.IndexOf("/Monsters/", StringComparison.Ordinal) + 1)..] : meta;
+        Console.WriteLine($"#{shown}  rarity={rarity}  OMP=0x{omp:X}  {shortMeta}");
+
+        foreach (var s in seeds)
+        {
+            var names = ModReadNames(reader, omp, s);
+            if (names.Count > 0) { seedHits[s.VecOff] = seedHits.GetValueOrDefault(s.VecOff) + 1;
+                Console.WriteLine($"    seed +0x{s.VecOff:X}: {string.Join(", ", names)}"); }
+        }
+        foreach (var (layout, found) in ModDiscover(reader, omp))
+        {
+            discHits[layout.VecOff] = discHits.GetValueOrDefault(layout.VecOff) + 1;
+            Console.WriteLine($"    disc +0x{layout.VecOff:X} (es 0x{layout.ElemSize:X}, a 0x{layout.SlotA:X}, b {(layout.SlotB < 0 ? "direct" : $"0x{layout.SlotB:X}")}): {string.Join(", ", found.Take(12))}");
+        }
+        Console.WriteLine();
+    }
+
+    Console.WriteLine($"scanned {shown} monster(s) (rarity >= {minRarity}).");
+    Console.WriteLine("seed-layout hit counts:  " + (seedHits.Count == 0 ? "(none)" : string.Join("  ", seedHits.OrderBy(k => k.Key).Select(k => $"+0x{k.Key:X}×{k.Value}"))));
+    Console.WriteLine("discovered vec hit counts: " + (discHits.Count == 0 ? "(none)" : string.Join("  ", discHits.OrderBy(k => k.Key).Select(k => $"+0x{k.Key:X}×{k.Value}"))));
     return 0;
 }
 
@@ -3862,3 +4004,5 @@ static class Win
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     public static extern int GetSystemMetrics(int n);
 }
+
+readonly record struct VecLayout(int VecOff, int ElemSize, int SlotA, int SlotB);

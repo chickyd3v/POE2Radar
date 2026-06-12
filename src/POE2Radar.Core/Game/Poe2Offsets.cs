@@ -173,6 +173,17 @@ public static class Poe2
     {
         // ✓ validated live across 21 monsters (values 0 and 2 seen). Enum: 0=Normal,1=Magic,2=Rare,3=Unique.
         public const int Rarity = 0x144;
+
+        // ⚠ affix-mod vector (the rolled monster modifiers — auras/buffs like MonsterPhysicalDamageAura1).
+        // std::vector at +0x168; element stride 0x20, record pointer at element+0x8, mod-id UTF-16 string
+        // at record+0x0. Validated live 2026-06-11 across Magic/Rare/Unique (Research --mods); the seed
+        // matched what the brute-force discovery found on every monster. NOT yet ✓-tier — one patch's
+        // evidence — and patch-volatile, so the overlay reads it but Research --mods re-discovers on drift.
+        // (+0x150 is the rarity/tier PLACEHOLDER vector — MonsterRare/Magic/Unique{N} filler — not affixes.)
+        public const int Mods = 0x168;
+        public const int ModElemStride = 0x20;
+        public const int ModRecordPtr = 0x8;   // element + this → mod record pointer
+        public const int ModIdString = 0x0;    // record + this → UTF-16 mod id
     }
 
     /// <summary>Chest component. ✓ OpenState @ +0x168 — the offset is stable, but the 2026-06-06 patch

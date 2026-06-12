@@ -399,7 +399,7 @@ internal static class DashboardHtml
         <div class="panel-grid">
           <div class="card" style="grid-column:1/-1">
             <h3>Display Rules <span class="tag">&middot; one ordered ruleset &mdash; first match wins</span></h3>
-            <div class="row"><div class="rl hint-row">The single source of truth for how every entity draws. Each entity is matched <b>top&ndash;to&ndash;bottom</b>; the <b>first enabled rule that matches</b> decides everything &mdash; its icon &amp; color, whether it&rsquo;s hidden, whether it shows an HP bar, and whether it&rsquo;s auto-pathed. Reorder with &#9650;/&#9660; to change precedence. A rule matches on any mix of <i>type, metadata terms, rarity, reaction, life, chest/POI/encounter state</i>; a blank condition means &ldquo;any&rdquo;. No more conflicting filters &mdash; if two rules could match, the higher one wins.</div></div>
+            <div class="row"><div class="rl hint-row">The single source of truth for how every entity draws. Each entity is matched <b>top&ndash;to&ndash;bottom</b>; the <b>first enabled rule that matches</b> decides everything &mdash; its icon &amp; color, whether it&rsquo;s hidden, whether it shows an HP bar, and whether it&rsquo;s auto-pathed. Reorder with &#9650;/&#9660; to change precedence. A rule matches on any mix of <i>type, metadata terms, monster mods (auras/buffs), rarity, reaction, life, chest/POI/encounter state</i>; a blank condition means &ldquo;any&rdquo;. No more conflicting filters &mdash; if two rules could match, the higher one wins.</div></div>
             <div id="drList"></div>
             <div class="controls" style="margin:8px 0 0">
               <button class="addbtn" id="drPick" style="width:auto;margin:0;padding:9px 16px">+ Add from game data…</button>
@@ -810,9 +810,18 @@ let hidden=[], drules=[];
 function flashF(){ const m=$('#savedMsgF'); if(!m) return; m.classList.add('show'); clearTimeout(m._t); m._t=setTimeout(()=>m.classList.remove('show'),1100); }
 async function postHidden(body){ try{ await fetch('/api/hidden',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); flashF(); }catch(e){} }
 async function loadFilters(){
+  await loadModVocab();   // populate the mods autocomplete BEFORE rendering rule rows reference it
   await loadDrules();
   try{ const h=await getJSON('/api/hidden'); hidden=h.patterns||[]; }catch(e){ hidden=[]; }
   renderHidden();
+}
+/* The persistent monster-mod catalog feeds the <datalist> the Mods matcher autocompletes against, so
+   you can pick a known aura/buff id instead of recalling it. Refreshed each time the Rules tab loads. */
+async function loadModVocab(){
+  let mods=[]; try{ const r=await getJSON('/api/mods'); mods=(r&&r.mods)||[]; }catch(_){ mods=[]; }
+  let dl=document.getElementById('modVocab');
+  if(!dl){ dl=document.createElement('datalist'); dl.id='modVocab'; document.body.appendChild(dl); }
+  dl.innerHTML=mods.map(m=>`<option value="${esc(m)}">`).join('');
 }
 
 /* ── Display Rules: the unified ordered ruleset. The page holds the array, edits it, and re-POSTs
@@ -829,6 +838,7 @@ function drSummary(r){
   const p=[];
   p.push((r.categories&&r.categories.length)?r.categories.join('/'):'any type');
   if(r.match&&r.match.length) p.push('“'+r.match.join(', ')+'”');
+  if(r.mods&&r.mods.length) p.push('mods: '+r.mods.join(', '));
   ['rarity','reaction','life','chest','poi','encounter'].forEach(f=>{ if(r[f]) p.push(r[f]); });
   return esc(p.join(' · '));
 }
@@ -839,6 +849,7 @@ function drRow(r,i){
   const body=open?`<div class="drbody">
       <div class="top"><input class="mname dr-name" value="${esc(r.name)}" placeholder="rule name"></div>
       <input class="matchin dr-match" placeholder="match: metadata terms, comma-separated (blank = any)" value="${esc((r.match||[]).join(', '))}">
+      <input class="matchin dr-mods" list="modVocab" placeholder="monster mods: aura/buff terms, comma-separated (e.g. Aura, ManaSiphon) — blank = any" value="${esc((r.mods||[]).join(', '))}">
       <div class="mcats"><span class="mcats-lbl">Type</span>${DR_CATS.map(c=>
         `<label class="catchip${cats.includes(c)?' on':''}"><input type="checkbox" class="dr-cat" data-cat="${c}"${cats.includes(c)?' checked':''}>${c}</label>`).join('')}</div>
       <div class="drconds">${DR_SELECTS.map(([f,l,o])=>drSel(f,l,o,r[f])).join('')}</div>
@@ -882,6 +893,7 @@ function renderDrules(){
     const pk=row.querySelector('.iconpick');
     row.querySelector('.dr-name').onchange=e=>{ r.name=e.target.value; save(); };
     row.querySelector('.dr-match').onchange=e=>{ r.match=e.target.value.split(',').map(s=>s.trim()).filter(Boolean); save(); };
+    row.querySelector('.dr-mods').onchange=e=>{ r.mods=e.target.value.split(',').map(s=>s.trim()).filter(Boolean); save(); };
     row.querySelectorAll('.dr-cat').forEach(cb=>cb.onchange=()=>{ r.categories=[...row.querySelectorAll('.dr-cat:checked')].map(c=>c.dataset.cat); cb.closest('.catchip').classList.toggle('on',cb.checked); save(); });
     row.querySelectorAll('.dr-cond').forEach(sel=>sel.onchange=()=>{ r[sel.dataset.f]=sel.value||null; save(); });
     row.querySelector('.dr-hide').onchange=e=>{ r.hide=e.target.checked; row.classList.toggle('hideon',r.hide); save(); };

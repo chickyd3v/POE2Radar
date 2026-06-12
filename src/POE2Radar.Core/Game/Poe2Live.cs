@@ -25,7 +25,13 @@ public sealed class Poe2Live
     private readonly Dictionary<nint, string> _meta = new();
     private readonly Dictionary<nint, nint> _iconAddr = new();     // entity → MinimapIcon component (0 = none); game POI
     private readonly Dictionary<nint, Rarity> _rarity = new();     // entity → rarity (static per spawn; cached)
+    private readonly Dictionary<nint, string[]> _mods = new();     // entity → affix mod ids (static per spawn; cached; empty = no mods)
     private readonly Dictionary<nint, uint> _idAt = new();         // entity address → last-seen std::map key id (recycle guard)
+    // Bounds the number of NEW (uncached) monster mod reads per Entities() pass so walking into a large
+    // pack can't stall the world tick. Cached monsters cost nothing; new ones fill over a few ticks.
+    private int _modReadBudget;
+    private const int ModReadBudgetPerPass = 16;
+    private readonly byte[] _modVecBuf = new byte[24]; // one StdVector (First/Last/End)
     private nint _entCacheKey;   // AreaInstance address the entity caches were built for
 
     // Reused across Entities() calls (tick thread only) to avoid per-tick allocations. The std::map
@@ -50,8 +56,13 @@ public sealed class Poe2Live
 
     public readonly record struct EntityDot(
         uint Id, nint Address, System.Numerics.Vector2 Grid, Vector3 World, EntityCategory Category, string Metadata,
-        int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity, bool Opened, bool IconComplete = false)
+        int HpCur, int HpMax, bool Poi, byte Reaction, Rarity Rarity, bool Opened, bool IconComplete = false,
+        IReadOnlyList<string>? Mods = null)
     {
+        /// <summary>The monster's affix mod ids (auras/buffs), never null. Empty for non-monsters,
+        /// unrolled monsters, or before the budgeted mod read has filled this entity in.</summary>
+        public IReadOnlyList<string> ModList => Mods ?? Array.Empty<string>();
+
         /// <summary>Monsters are "alive" only with positive HP; non-life entities are always shown.</summary>
         public bool IsAlive => HpMax <= 0 || HpCur > 0;
         public bool HasLife => HpMax > 0;
@@ -288,7 +299,7 @@ public sealed class Poe2Live
         if (areaInstance != _entCacheKey)
         {
             _renderAddr.Clear(); _lifeAddr.Clear(); _posAddr.Clear(); _ompAddr.Clear(); _chestAddr.Clear();
-            _category.Clear(); _meta.Clear(); _iconAddr.Clear(); _rarity.Clear(); _idAt.Clear();
+            _category.Clear(); _meta.Clear(); _iconAddr.Clear(); _rarity.Clear(); _mods.Clear(); _idAt.Clear();
             _entCacheKey = areaInstance;
         }
 
@@ -300,6 +311,7 @@ public sealed class Poe2Live
         var root = Ptr(head + Poe2.StdMapNode.Parent);
         _entQueue.Clear(); _entQueue.Enqueue(root);
         _entVisited.Clear();
+        _modReadBudget = ModReadBudgetPerPass;
         while (_entQueue.Count > 0 && _entVisited.Count < 200000)
         {
             var node = _entQueue.Dequeue();
@@ -337,10 +349,11 @@ public sealed class Poe2Live
             if (cat is EntityCategory.Monster or EntityCategory.Player) (hpCur, hpMax) = ReadHp(entity);
             if (cat is EntityCategory.Monster or EntityCategory.Chest) rarity = ReadRarity(entity);
             if (cat == EntityCategory.Chest) opened = ReadChestOpened(entity);
+            var mods = cat == EntityCategory.Monster ? ReadMods(entity) : null;
 
             var (poi, iconComplete) = ReadIcon(entity);
             dots.Add(new EntityDot(id, entity, g, wv, cat, _meta.GetValueOrDefault(entity, ""), hpCur, hpMax,
-                poi, ReadReaction(entity), rarity, opened, iconComplete));
+                poi, ReadReaction(entity), rarity, opened, iconComplete, mods));
         }
         return dots;
     }
@@ -351,7 +364,7 @@ public sealed class Poe2Live
     {
         _renderAddr.Remove(entity); _lifeAddr.Remove(entity); _posAddr.Remove(entity);
         _ompAddr.Remove(entity); _chestAddr.Remove(entity); _category.Remove(entity);
-        _meta.Remove(entity); _iconAddr.Remove(entity); _rarity.Remove(entity);
+        _meta.Remove(entity); _iconAddr.Remove(entity); _rarity.Remove(entity); _mods.Remove(entity);
     }
 
     /// <summary>
@@ -390,6 +403,70 @@ public sealed class Poe2Live
         var rarity = r is >= 0 and <= 3 ? (Rarity)r : Rarity.Normal;
         _rarity[entity] = rarity;
         return rarity;
+    }
+
+    /// <summary>
+    /// The monster's affix mod ids (auras/buffs) from ObjectMagicProperties+Mods. Like rarity, mods are
+    /// fixed at spawn, so the result is cached per entity (even when empty) and read at most once. New
+    /// (uncached) reads are bounded by <see cref="_modReadBudget"/> per pass so a fresh pack fills over a
+    /// few world ticks rather than stalling one. Reads ONLY the rolled-affix vector (+0x168); the +0x150
+    /// rarity-placeholder filler (MonsterRare/Magic/Unique{N}) is intentionally excluded.
+    /// </summary>
+    private string[]? ReadMods(nint entity)
+    {
+        if (_mods.TryGetValue(entity, out var cached)) return cached.Length == 0 ? null : cached;
+        if (_modReadBudget <= 0) return null;                  // out of budget this pass — retry next tick (don't cache)
+
+        if (!_ompAddr.TryGetValue(entity, out var omp))
+        {
+            omp = ResolveComponent(entity, "ObjectMagicProperties");
+            _ompAddr[entity] = omp;
+        }
+        if (omp == 0) { _mods[entity] = Array.Empty<string>(); return null; }
+        _modReadBudget--;
+
+        // StdVector at omp+Mods: [First, Last, End]. Element stride ModElemStride; each element holds a
+        // record pointer at +ModRecordPtr; the record's +ModIdString is a UTF-16 mod-id string.
+        if (_reader.TryReadBytes(omp + Poe2.ObjectMagicProperties.Mods, _modVecBuf) < _modVecBuf.Length)
+            return null; // transient read failure — leave uncached, retry next tick
+        var first = (nint)BitConverter.ToInt64(_modVecBuf, 0);
+        var last = (nint)BitConverter.ToInt64(_modVecBuf, 8);
+        var len = (long)last - first;
+        const int stride = Poe2.ObjectMagicProperties.ModElemStride;
+        if (first == 0 || len <= 0 || len > 0x4000 || len % stride != 0)
+        {
+            _mods[entity] = Array.Empty<string>(); return null; // no/garbage affix vector — cache as empty
+        }
+        var n = (int)(len / stride);
+        if (n > 100) { _mods[entity] = Array.Empty<string>(); return null; }
+
+        var list = new List<string>(n);
+        for (var i = 0; i < n; i++)
+        {
+            var rec = Ptr(first + (nint)(i * stride + Poe2.ObjectMagicProperties.ModRecordPtr));
+            if (rec == 0) continue;
+            var idPtr = Poe2.ObjectMagicProperties.ModIdString == 0 ? rec : Ptr(rec + Poe2.ObjectMagicProperties.ModIdString);
+            if (idPtr == 0) continue;
+            var s = _reader.ReadStringUtf16(idPtr, 64);
+            if (LooksLikeModId(s) && !list.Contains(s)) list.Add(s);
+        }
+        var arr = list.Count == 0 ? Array.Empty<string>() : list.ToArray();
+        _mods[entity] = arr;
+        return arr.Length == 0 ? null : arr;
+    }
+
+    /// <summary>A GGG mod id is a non-trivial identifier: letters/digits/underscore only, has a letter.</summary>
+    private static bool LooksLikeModId(string s)
+    {
+        if (s.Length is < 3 or > 64) return false;
+        var hasLetter = false;
+        foreach (var c in s)
+        {
+            if (c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z')) { hasLetter = true; continue; }
+            if (c is (>= '0' and <= '9') or '_') continue;
+            return false;
+        }
+        return hasLetter;
     }
 
     private byte ReadReaction(nint entity)
