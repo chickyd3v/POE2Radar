@@ -1075,18 +1075,30 @@ public sealed class Poe2Live
 
     // ── internals ───────────────────────────────────────────────────────────
 
-    /// <summary>RENDER-RATE live read of one already-known monster's world position + HP, reusing the
-    /// component addresses cached by the last <see cref="Entities"/> walk (no component re-resolve, no map
-    /// re-enumeration). This is what lets HP bars track a moving monster smoothly at the full frame rate
-    /// while the expensive entity enumeration stays at world rate. Two tiny reads (12-byte position, 8-byte
-    /// vital). Returns false if the entity isn't in the current area's cache or the position read fails.</summary>
+    /// <summary>RENDER-RATE live read of one monster's world position + HP. Reuses component addresses
+    /// cached by the last <see cref="Entities"/> walk when available; resolves on cache miss so the render
+    /// thread can use a different <see cref="Poe2Live"/> instance than the world reader.</summary>
     public bool TryLiveBar(nint entity, out Vector3 world, out int hpCur, out int hpMax)
     {
         world = default; hpCur = 0; hpMax = 0;
-        if (!_renderAddr.TryGetValue(entity, out var render) || render == 0) return false;
+        if (!_renderAddr.TryGetValue(entity, out var render))
+        {
+            render = ResolveComponent(entity, "Render");
+            _renderAddr[entity] = render;
+        }
+        if (render == 0) return false;
         if (!_reader.TryReadStruct<Vector3>(render + Poe2.Render.CurrentWorldPosition, out world)) return false;
-        if (_lifeAddr.TryGetValue(entity, out var life) && life != 0
-            && _reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v)) { hpCur = v.Current; hpMax = v.Max; }
+        if (!_lifeAddr.TryGetValue(entity, out var life))
+        {
+            life = ResolveComponent(entity, "Life");
+            _lifeAddr[entity] = life;
+        }
+        if (life != 0)
+        {
+            EnsureVitalOffsets(life);
+            if (_reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v))
+            { hpCur = v.Current; hpMax = v.Max; }
+        }
         return true;
     }
 

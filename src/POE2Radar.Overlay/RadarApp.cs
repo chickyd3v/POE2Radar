@@ -83,6 +83,10 @@ public sealed class RadarApp : IDisposable
     private static string ConfigDir => Path.Combine(AppContext.BaseDirectory, "config");
 
     private readonly List<HpBarTarget> _hpFrame = new();
+    private readonly HpBarScreenSmoother _hpSmooth = new();
+    private readonly Stopwatch _hpSmoothClock = Stopwatch.StartNew();
+    private readonly HashSet<nint> _hpActive = new();
+    private uint _hpSmoothAreaHash;
     private readonly List<SelectedPath> _renderPaths = new();
     private Poe2Live.TerrainData? _worldTerrain;   // world-thread terrain cache (published via snapshot)
     private uint _areaHash;
@@ -404,12 +408,33 @@ public sealed class RadarApp : IDisposable
             _cameraMatrix = _live.CameraMatrix(inGameState);
             TickAutoFlask(localPlayer);
 
-            _hpFrame.Clear();
-            foreach (var spec in snap.HpSpecs)
+            if (snap.AreaHash != _hpSmoothAreaHash)
             {
-                if (!_live.TryLiveBar(spec.Entity, out var w, out var cur, out var max) || max <= 0 || cur <= 0) continue;
-                _hpFrame.Add(new HpBarTarget(w, Math.Clamp((float)cur / max, 0f, 1f), spec.Width, spec.Fill, spec.BorderWidth, spec.Border));
+                _hpSmoothAreaHash = snap.AreaHash;
+                _hpSmooth.Clear();
             }
+
+            var hpDt = (float)Math.Clamp(_hpSmoothClock.Elapsed.TotalSeconds, 0.001, 0.1);
+            _hpSmoothClock.Restart();
+            var hpCam = _cameraMatrix;
+            var hpSnap = hpCam is null || _hpSmooth.CameraMoved(hpCam);
+
+            _hpFrame.Clear();
+            _hpActive.Clear();
+            if (hpCam is not null)
+            {
+                var hpW = (float)_window.Width;
+                var hpH = (float)_window.Height;
+                foreach (var spec in snap.HpSpecs)
+                {
+                    // Component cache is populated by the world reader's Entities() walk on _worldLive.
+                    if (!_worldLive.TryLiveBar(spec.Entity, out var w, out var cur, out var max) || max <= 0 || cur <= 0) continue;
+                    if (!_hpSmooth.TryUpdate(spec.Entity, w, hpCam, hpW, hpH, hpDt, hpSnap, out var sx, out var sy)) continue;
+                    _hpActive.Add(spec.Entity);
+                    _hpFrame.Add(new HpBarTarget(sx, sy, Math.Clamp((float)cur / max, 0f, 1f), spec.Width, spec.Fill, spec.BorderWidth, spec.Border));
+                }
+            }
+            _hpSmooth.Prune(_hpActive);
 
             BuildRenderPaths(player, snap.Entities, snap.Landmarks);
             RefreshMapDiagnostics(map);
@@ -419,6 +444,8 @@ public sealed class RadarApp : IDisposable
             _renderPaths.Clear();
             _atlasOpen = false;
             _hpFrame.Clear();
+            _hpSmooth.Clear();
+            _hpSmoothAreaHash = 0;
         }
 
         var realActive = _gameHwnd != 0 && GetForegroundWindow() == _gameHwnd;
@@ -1130,7 +1157,7 @@ public sealed class RadarApp : IDisposable
                         foreach (var e in entities)
                         {
                             if (e.Id != eid) continue;
-                            if (_live.TryLiveGrid(e.Address, out var g))
+                            if (_worldLive.TryLiveGrid(e.Address, out var g))
                                 liveGoal = ((int)g.X, (int)g.Y);
                             break;
                         }

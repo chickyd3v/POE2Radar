@@ -26,10 +26,10 @@ public readonly record struct SelectedPath(
     (int x, int y)? LiveGoal = null);
 
 /// <summary>A monster HP bar to draw, with everything expensive already decided at world rate: the style
-/// (width + packed 0xAARRGGBB fill/border colors) was resolved once when the entity set was built; only
-/// <see cref="World"/> + <see cref="Frac"/> are refreshed live every render frame (cheap per-entity reads)
-/// so the bar tracks the moving monster smoothly. The renderer just projects + fills.</summary>
-public readonly record struct HpBarTarget(Vector3 World, float Frac, float Width, uint Fill, float BorderWidth, uint Border);
+/// (width + packed 0xAARRGGBB fill/border colors) was resolved once when the entity set was built;
+/// <see cref="ScreenX"/>/<see cref="ScreenY"/> are eased in screen space (snapped while the camera moves)
+/// and <see cref="Frac"/> is refreshed live. The renderer just fills at the precomputed screen anchor.</summary>
+public readonly record struct HpBarTarget(float ScreenX, float ScreenY, float Frac, float Width, uint Fill, float BorderWidth, uint Border);
 
 /// <summary>One atlas node to highlight. <see cref="X"/>/<see cref="Y"/> are the node's canvas-space
 /// RelativePos; the renderer projects them to screen via the atlas transform (scale + offset).</summary>
@@ -89,8 +89,8 @@ public sealed record RenderContext(
     // ── User-tweakable icon style table + HP-bar geometry (mirrored from RadarSettings). ──
     RadarStyles Styles,
     HpBarSettings HpBars,
-    // Monster HP bars: style decided at world rate, position/HP refreshed live each render frame so bars
-    // track moving mobs smoothly. Null/empty → none. Replaces the old per-frame resolve over all entities.
+    // Monster HP bars: style at world rate, screen anchor eased in RadarApp (snapped while camera moves).
+    // Null/empty → none.
     IReadOnlyList<HpBarTarget>? HpBarTargets,
     // Walkable-terrain bitmap colors/transparency (mirrored from RadarSettings).
     TerrainSettings TerrainStyle,

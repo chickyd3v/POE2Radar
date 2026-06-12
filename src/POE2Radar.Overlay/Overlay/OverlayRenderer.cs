@@ -281,22 +281,16 @@ public sealed class OverlayRenderer : IDisposable
     /// </summary>
     private void DrawNameplates(ID2D1RenderTarget rt, RenderContext ctx)
     {
-        if (ctx.CameraMatrix is not { } m || ctx.HpBarTargets is not { Count: > 0 } bars) return;
+        if (ctx.HpBarTargets is not { Count: > 0 } bars) return;
         float W = ctx.WindowWidth, H = ctx.WindowHeight;
         var hb = ctx.HpBars;
         var bh = hb.Height;
-        // All the expensive per-entity decisions (rarity gate, rule resolve, colour parse) were done at
-        // world rate in RadarApp.BuildHpSpecs; here we only project the LIVE position (refreshed this frame
-        // so the bar tracks the moving mob) and fill. fill/border are pre-packed 0xAARRGGBB.
+        // Style decisions were done at world rate in RadarApp.BuildHpSpecs; screen anchors are eased
+        // there (snapped while the camera moves). fill/border are pre-packed 0xAARRGGBB.
         foreach (var t in bars)
         {
-            var w = t.World;
-            var cw = w.X*m[3] + w.Y*m[7] + w.Z*m[11] + m[15];
-            if (cw <= 0.0001f) continue;
-            var cx = w.X*m[0] + w.Y*m[4] + w.Z*m[8] + m[12];
-            var cy = w.X*m[1] + w.Y*m[5] + w.Z*m[9] + m[13];
-            var sx = (cx/cw/2f + 0.5f) * W;
-            var sy = (0.5f - cy/cw/2f) * H;
+            var sx = t.ScreenX;
+            var sy = t.ScreenY;
             if (sx < 0 || sx > W || sy < 0 || sy > H) continue;
 
             var bw = t.Width;
