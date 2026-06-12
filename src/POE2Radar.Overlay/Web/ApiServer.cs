@@ -147,6 +147,16 @@ public sealed class ApiServer : IDisposable
                     areaName = ZoneGuide.Shared.FriendlyName(s.AreaCode),
                     areaAct = ZoneGuide.Shared.Area(s.AreaCode)?.Act ?? 0,
                     mapVisible = s.MapVisible, zoom = s.Zoom,
+                    minimapVisible = s.MinimapVisible,
+                    minimapRect = new { left = s.MinimapLeft, top = s.MinimapTop, right = s.MinimapRight, bottom = s.MinimapBottom },
+                    mapDebug = new
+                    {
+                        largeOpen = s.MapVisible,
+                        miniW = s.MinimapRight - s.MinimapLeft,
+                        miniH = s.MinimapBottom - s.MinimapTop,
+                        windowW = s.WindowWidth,
+                        windowH = s.WindowHeight,
+                    },
                     hpPct = s.HpPct, manaPct = s.ManaPct, esPct = s.EsPct, autoFlask = s.AutoFlask, flask = s.FlaskNote,
                     player = new { x = s.Player.X, y = s.Player.Y },
                     entityCount = s.Entities.Count,
@@ -444,7 +454,9 @@ public sealed class ApiServer : IDisposable
     private object ReadSettings() => new
     {
         hideJunk = _settings.HideJunk,
-        showPath = _settings.ShowPath,
+        showPathWorld = _settings.ShowPathWorld,
+        showPathMap = _settings.ShowPathMap,
+        showPathMinimap = _settings.ShowPathMinimap,
         alwaysShowOverlay = _settings.AlwaysShowOverlay,
         useCuratedLandmarks = _settings.UseCuratedLandmarks,
         landmarkClusterGap = _settings.LandmarkClusterGap,
@@ -488,7 +500,13 @@ public sealed class ApiServer : IDisposable
             switch (p.Name)
             {
                 case "hideJunk" when TryBool(p.Value, out var b): _settings.HideJunk = b; applied.Add(p.Name); break;
-                case "showPath" when TryBool(p.Value, out var b): _settings.ShowPath = b; applied.Add(p.Name); break;
+                case "showPathWorld" when TryBool(p.Value, out var b): _settings.ShowPathWorld = b; applied.Add(p.Name); break;
+                case "showPathMap" when TryBool(p.Value, out var b): _settings.ShowPathMap = b; applied.Add(p.Name); break;
+                case "showPathMinimap" when TryBool(p.Value, out var b): _settings.ShowPathMinimap = b; applied.Add(p.Name); break;
+                case "showPath" when TryBool(p.Value, out var b):
+                    _settings.ShowPathWorld = _settings.ShowPathMap = _settings.ShowPathMinimap = b;
+                    applied.Add("showPathWorld"); applied.Add("showPathMap"); applied.Add("showPathMinimap");
+                    break;
                 case "alwaysShowOverlay" when TryBool(p.Value, out var b): _settings.AlwaysShowOverlay = b; applied.Add(p.Name); break;
                 case "useCuratedLandmarks" when TryBool(p.Value, out var b): _settings.UseCuratedLandmarks = b; applied.Add(p.Name); break;
                 case "landmarkClusterGap" when TryInt(p.Value, out var n): _settings.LandmarkClusterGap = Math.Clamp(n, 0, 64); applied.Add(p.Name); break;
@@ -883,7 +901,14 @@ public sealed record RadarState(
     string FlaskNote,
     string AreaCode,
     string CharName,
-    int CharLevel)
+    int CharLevel,
+    bool MinimapVisible = false,
+    float MinimapLeft = 0,
+    float MinimapTop = 0,
+    float MinimapRight = 0,
+    float MinimapBottom = 0,
+    int WindowWidth = 0,
+    int WindowHeight = 0)
 {
     public static readonly RadarState Empty =
         new(false, 0, 0, false, 0, System.Numerics.Vector2.Zero,

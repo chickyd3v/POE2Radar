@@ -48,11 +48,17 @@ clearly gated — a personal QoL tool, not a headless bot.
   grid↔world scale (250/23 ≈ 10.87).
 
 **Overlay** (`src/POE2Radar.Overlay/`):
-- `RadarApp.cs` — tick loop. Render rate (~144 Hz): live player + render. World rate (~30 Hz):
-  refresh entities/terrain/landmarks. Publishes a `RadarState` for the API; runs auto-flask.
+- `RadarApp.cs` — **dual-rate loop**: a background world reader (~30 Hz) walks entities/terrain/
+  landmarks, builds nav targets, and drains A* replans into a volatile `WorldSnapshot`; the render
+  thread runs at `FpsCap` (60–144 Hz) for hot reads (player, camera, HP-bar live positions, route
+  cursor advance + entity-goal tails) and Direct2D present. Publishes `RadarState` on world ticks.
+- `WorldSnapshot.cs` — immutable world-state swap published by the world thread.
 - `Overlay/OverlayWindow.cs` — per-pixel-alpha layered window (`UpdateLayeredWindow`), tracks the
-  game window. `Overlay/OverlayRenderer.cs` — Direct2D: terrain bitmap + entity dots + landmark
-  markers + world-space HP bars + player blip + HUD. Drawn only when PoE2 is focused. Icon
+  game window. `Overlay/OverlayRenderer.cs` — Direct2D: corner **minimap** layer (clipped to the
+  UiElement screen rect) + full-screen Tab map + world-projected paths + entity dots + landmarks +
+  world-space HP bars + player blip + nav menu. Path layers are independently toggled
+  (`ShowPathWorld` / `ShowPathMap` / `ShowPathMinimap`). `ShowTerrain` applies to both map
+  viewports. Drawn only when PoE2 is focused. Icon
   shape/color/opacity/size per item, metadata-matched "mechanic" overrides, and HP-bar geometry are
   config-driven via `RadarSettings.Styles` / `.HpBars` (defaults mirror the old hardcoded look) and
   editable live in the Console Settings tab. HP-bar rarity is signaled by scaling border weight.

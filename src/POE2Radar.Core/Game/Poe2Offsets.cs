@@ -283,16 +283,17 @@ public static class Poe2
         public const int TgtPath = 0x08; // ✓ StdWString — full tile .tdt path (e.g. .../Feature/arena_01.tdt)
     }
 
-    // ── Map UI — GH2, not yet live-checked ──
+    // ── Map UI — MapParent is GH2-only; live PoE2 (2026-06) resolves +0x50 == +0x58 (invalid).
+    // Use the two MapUiElements (DefaultShift 0,-20) instead; see Research --map-probe.
     public static class ImportantUi
     {
-        public const int MapParentPtr = 0x738; // (GH2) from UiRoot/GameUi
+        public const int MapParentPtr = 0x738; // (GH2) from UiRoot/GameUi — not valid live in PoE2
     }
 
     public static class MapParent
     {
-        public const int LargeMapPtr = 0x50; // (GH2)
-        public const int MiniMapPtr  = 0x58; // (GH2)
+        public const int LargeMapPtr = 0x50; // (GH2) — not valid live in PoE2
+        public const int MiniMapPtr  = 0x58; // (GH2) — not valid live in PoE2
     }
 
     /// <summary>

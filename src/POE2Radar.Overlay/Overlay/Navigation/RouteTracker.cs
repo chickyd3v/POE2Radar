@@ -15,7 +15,7 @@ namespace POE2Radar.Overlay.Navigation;
 public sealed class RouteTracker
 {
     // ── Trigger thresholds (grid cells / seconds). ──
-    private const double ReplanCooldownSec   = 1.0;   // min spacing between replans for this target
+    private const double ReplanCooldownSec   = 0.25;  // min spacing between replans for this target
     private const double StaleSec            = 8.0;   // force a refresh even if nothing else fired
     private const float  OffPathCells        = 18f;   // perpendicular distance that counts as "off the path"
     private const float  GoalMovedCells      = 8f;    // goal drift (entity targets move) that forces a replan
@@ -36,7 +36,10 @@ public sealed class RouteTracker
     /// <summary>True while a background replan for this target is enqueued/running (set by the owner).</summary>
     public bool ReplanInFlight { get; set; }
 
-    /// <summary>Waypoints from the cursor onward — what the renderer draws for this target.</summary>
+    /// <summary>Full planned route (cursor is for replan triggers only — rendering trims forward itself).</summary>
+    public IReadOnlyList<(int x, int y)> AllWaypoints => _waypoints;
+
+    /// <summary>Waypoints from the cursor onward — used by replan/off-path triggers only.</summary>
     public IReadOnlyList<(int x, int y)> CurrentPoints
         => _cursor <= 0 ? _waypoints : _waypoints.GetRange(_cursor, _waypoints.Count - _cursor);
 

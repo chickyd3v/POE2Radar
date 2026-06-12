@@ -3,6 +3,7 @@ using System.Numerics;
 using POE2Radar.Core.Game;
 using POE2Radar.Core.Pathfinding;
 using POE2Radar.Overlay.Config;
+using POE2Radar.Overlay.Navigation;
 using Vortice.Direct2D1;
 using Vortice.DirectWrite;
 using Vortice.Mathematics;
@@ -109,10 +110,22 @@ public sealed class OverlayRenderer : IDisposable
             else if (ctx.Active && ctx.InGame)
             {
                 DrawNameplates(rt, ctx);                   // world-space HP bars over hostile mobs
-                if (ctx.Map.IsVisible)
-                    DrawMap(rt, ctx);                      // terrain + dots + on-map path polylines
-                else
-                    DrawPathsWorld(rt, ctx);               // ground waypoints + lines when the map is closed
+
+                // Corner minimap — only while the Tab large map is closed (PoE2 hides one or the other).
+                if (!ctx.Map.IsLargeOpen)
+                {
+                    var mini = ctx.Map.Mini;
+                    if (mini.HasScreenRect)
+                        DrawMapLayer(rt, ctx, mini, drawPaths: ctx.ShowPathMinimap, clipToRect: true);
+                }
+
+                // Full-screen Tab map.
+                if (ctx.Map.IsLargeOpen)
+                    DrawMapLayer(rt, ctx, ctx.Map.Large, drawPaths: ctx.ShowPathMap, clipToRect: false);
+
+                // Ground-projected paths when the large map is closed.
+                if (!ctx.Map.IsLargeOpen && ctx.ShowPathWorld)
+                    DrawPathsWorld(rt, ctx);
 
                 // The navigation-menu widget is ALWAYS interactive in-game (map open or not). It
                 // (re)builds _legendRowRects, so it must run last; nothing else touches those rects now.
@@ -326,23 +339,30 @@ public sealed class OverlayRenderer : IDisposable
 
         foreach (var path in ctx.SelectedPaths)
         {
-            if (path.Points.Count == 0) continue;
+            var fwd = NavigationPathBuilder.BuildForwardPath(ctx.PlayerGrid, path.Points, path.LiveGoal);
+            if (fwd.Count == 0 && path.LiveGoal is null) continue;
             _bPath!.Color = PathColor(path.ColorSlot);
 
-            NumVec2? prev = null;
-            foreach (var (gx, gy) in path.Points)
+            var prev = ProjectWorldGrid(ctx.PlayerGrid.X, ctx.PlayerGrid.Y, z, m, W, H);
+            foreach (var (gx, gy) in fwd)
             {
-                float wx = gx * GridConstants.GridToWorld, wy = gy * GridConstants.GridToWorld;
-                var cw = wx * m[3] + wy * m[7] + z * m[11] + m[15];
-                if (cw <= 0.0001f) { prev = null; continue; } // waypoint behind camera — break the line
-                var cxp = wx * m[0] + wy * m[4] + z * m[8] + m[12];
-                var cyp = wx * m[1] + wy * m[5] + z * m[9] + m[13];
-                var p = new NumVec2((cxp / cw / 2f + 0.5f) * W, (0.5f - cyp / cw / 2f) * H);
-                if (prev is { } pr) rt.DrawLine(pr, p, _bPath, 3f);
-                rt.FillEllipse(new Ellipse(p, 4f, 4f), _bPath);
+                var p = ProjectWorldGrid(gx, gy, z, m, W, H);
+                if (p is null) { prev = null; continue; }
+                if (prev is { } pr) rt.DrawLine(pr, p.Value, _bPath, 3f);
+                rt.FillEllipse(new Ellipse(p.Value, 4f, 4f), _bPath);
                 prev = p;
             }
         }
+    }
+
+    private static NumVec2? ProjectWorldGrid(float gx, float gy, float z, float[] m, float W, float H)
+    {
+        float wx = gx * GridConstants.GridToWorld, wy = gy * GridConstants.GridToWorld;
+        var cw = wx * m[3] + wy * m[7] + z * m[11] + m[15];
+        if (cw <= 0.0001f) return null;
+        var cxp = wx * m[0] + wy * m[4] + z * m[8] + m[12];
+        var cyp = wx * m[1] + wy * m[5] + z * m[9] + m[13];
+        return new NumVec2((cxp / cw / 2f + 0.5f) * W, (0.5f - cyp / cw / 2f) * H);
     }
 
     /// <summary>
@@ -428,13 +448,24 @@ public sealed class OverlayRenderer : IDisposable
     /// <summary>Clamp a 0..1 channel to a 0..255 byte (rounded).</summary>
     private static byte ToByte(float f) => (byte)Math.Clamp((int)MathF.Round(f * 255f), 0, 255);
 
-    private void DrawMap(ID2D1RenderTarget rt, RenderContext ctx)
+    /// <summary>Draw terrain, entity dots, landmarks, paths, and player blip for one map viewport
+    /// (full-screen large map or clipped corner minimap).</summary>
+    private void DrawMapLayer(ID2D1RenderTarget rt, RenderContext ctx, Poe2Live.MapViewport vp, bool drawPaths, bool clipToRect)
     {
-        // MapCenter = window center + DefaultShift(0,-20) + Shift + manual offset.
-        var center = new NumVec2(
-            ctx.WindowWidth  * 0.5f + ctx.Map.ShiftX + ctx.OffsetX,
-            ctx.WindowHeight * 0.5f + ctx.Map.ShiftY - 20f + ctx.OffsetY);
-        var scale = ctx.Map.Zoom * (ctx.WindowHeight / 677f) * ctx.ScaleMul;
+        var useClip = clipToRect && vp.HasScreenRect;
+        if (useClip)
+            rt.PushAxisAlignedClip(new Vortice.RawRectF(vp.ScreenLeft, vp.ScreenTop, vp.ScreenRight, vp.ScreenBottom), AntialiasMode.Aliased);
+
+        var (cx, cy) = MapViewportLogic.MapProjectionCenter(
+            ctx.WindowWidth, ctx.WindowHeight,
+            vp.ShiftX, vp.ShiftY,
+            ctx.OffsetX, ctx.OffsetY,
+            clipToRect && vp.HasScreenRect,
+            vp.ScreenLeft, vp.ScreenTop, vp.ScreenRight, vp.ScreenBottom);
+        var center = new NumVec2(cx, cy);
+        // PoE2 uses the same map scale for large + minimap (window-height reference); the clip rect
+        // is the only difference for the corner widget (live --map-probe).
+        var scale = vp.Zoom * (ctx.WindowHeight / 677f) * ctx.ScaleMul;
         var player = ctx.PlayerGrid;
 
         // Terrain bitmap, projected via the same affine grid→screen transform.
@@ -506,14 +537,15 @@ public sealed class OverlayRenderer : IDisposable
             }
         }
 
-        // Draw-only guidance routes: one full smoothed A* polyline per selected landmark, each in its
-        // own legend color (precomputed by RadarApp). Drawn whenever a target is selected (selecting =
-        // intent to navigate); not gated on ShowPath.
-        DrawPaths(rt, ctx, player, center, scale);
+        if (drawPaths)
+            DrawPaths(rt, ctx, player, center, scale);
 
         // Player blip on top (toggleable — some prefer no self-marker).
         if (ctx.ShowPlayerBlip)
             rt.FillEllipse(new Ellipse(center, 5f, 5f), _bPlayer!);
+
+        if (useClip)
+            rt.PopAxisAlignedClip();
     }
 
     /// <summary>
@@ -525,13 +557,14 @@ public sealed class OverlayRenderer : IDisposable
     {
         foreach (var path in ctx.SelectedPaths)
         {
-            if (path.Points.Count < 2) continue;
+            var fwd = NavigationPathBuilder.BuildForwardPath(player, path.Points, path.LiveGoal);
+            if (fwd.Count == 0 && path.LiveGoal is null) continue;
             _bPath!.Color = PathColor(path.ColorSlot);
-            NumVec2? prev = null;
-            foreach (var (gx, gy) in path.Points)
+            var prev = Project(player, player, center, scale);
+            foreach (var (gx, gy) in fwd)
             {
                 var p = Project(new NumVec2(gx, gy), player, center, scale);
-                if (prev is { } pr) rt.DrawLine(pr, p, _bPath, 2.4f);
+                rt.DrawLine(prev, p, _bPath, 2.4f);
                 prev = p;
             }
         }

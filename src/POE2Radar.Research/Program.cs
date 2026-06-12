@@ -43,6 +43,15 @@ if (HasFlag(args, "--find-terrain"))
 if (HasFlag(args, "--find-map"))
     return RunFindMap(process, reader);
 
+if (HasFlag(args, "--map-probe"))
+    return RunMapProbe(process, reader);
+
+if (HasFlag(args, "--map-watch"))
+    return RunMapWatch(process, reader, TryGetIntArg(args, "--ms") ?? 400);
+
+if (HasFlag(args, "--map-scan-frames"))
+    return RunMapScanFrames(process, reader);
+
 if (HasFlag(args, "--watch-expedition"))
     return RunWatchExpedition(process, reader);
 
@@ -275,6 +284,9 @@ Console.WriteLine("  --dump <hexAddr> [--dump-len <N>]   hex-dump a region for i
 Console.WriteLine("  --dump <hexAddr> [--dump-len <N>]   hex-dump a region for inspection");
 Console.WriteLine("  --entity <hexAddr>         walk a PoE2 entity: id, metadata path, component map, Render→grid, Life");
 Console.WriteLine("  --presence [--diff]        baseline (then --diff) player components to find the presence-radius float");
+Console.WriteLine("  --map-probe                dump live large/minimap UI state (flags, sizes, rects, ReadMap)");
+Console.WriteLine("  --map-scan-frames          BFS UI tree for top-right square frames (minimap clip hunt)");
+Console.WriteLine("  --map-watch [--ms N]       poll map state; toggle Tab to diff open vs closed");
 Console.WriteLine("  --devtree [--port N]       browser-based live memory/UI/entity explorer (default port 7778)");
 Console.WriteLine("  --serverdata               dump ServerData (AreaInstance+0x580): strings + StdVector quest-list candidates");
 Console.WriteLine("  --aob                      scan for IngameState via AOB patterns");
@@ -3578,6 +3590,318 @@ static string? TryReadAnyText(MemoryReader reader, nint p)
         if (Printable(s)) return $"+{off:X}:{s}";
     }
     return null;
+}
+
+// ── Hunt top-right square UiElement frames (minimap clip container) ─────────
+static int RunMapScanFrames(ProcessHandle process, MemoryReader reader)
+{
+    var (_, inGameState, _, _) = ResolveChain(process, reader);
+    if (inGameState == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var (winW, winH) = TryGameClientSize(process.ProcessId);
+    var uiScale = winH / 1600f;
+    Console.WriteLine($"Game client ~{winW}x{winH}  uiScale={uiScale:F3}\n");
+
+    var uiRoot = SafePtr(reader, inGameState + Poe2.InGameState.UiRoot);
+    var trueRoot = SafePtr(reader, uiRoot + Poe2.UiElement.Parent);
+    var root = trueRoot != 0 && trueRoot != uiRoot ? trueRoot : uiRoot;
+    var queue = new Queue<nint>(); queue.Enqueue(root);
+    var visited = new HashSet<nint>();
+    var hits = new List<(nint el, float w, float h, float l, float t, float r, float b, bool local, bool hier)>();
+
+    while (queue.Count > 0 && visited.Count < 40000)
+    {
+        var el = queue.Dequeue();
+        if (el == 0 || !visited.Add(el)) continue;
+
+        var first = SafePtr(reader, el + Poe2.UiElement.Children);
+        if (first != 0 && reader.TryReadStruct<nint>(el + Poe2.UiElement.Children + 8, out var lastC))
+        {
+            var n = ((long)lastC - (long)first) / 8;
+            if (n is > 0 and <= 8192)
+                for (long k = 0; k < n; k++) queue.Enqueue(SafePtr(reader, first + (nint)(k * 8)));
+        }
+
+        var (uw, uh) = ReadUiSize(reader, el);
+        if (uw <= 0f || uh <= 0f) continue;
+        var aspect = uw / uh;
+        if (aspect is < 0.75f or > 1.33f) continue; // roughly square
+
+        var (l, t, r, b) = ReadUiScreenRect(reader, el, uiScale, winW, winH);
+        if (!MapViewportLogic.IsTopRightMinimapRect(l, t, r, b, winW, winH)) continue;
+
+        hits.Add((el, uw, uh, l, t, r, b,
+            IsUiVisibleLocal(reader, el),
+            IsUiHierarchicallyVisible(reader, el)));
+    }
+
+    Console.WriteLine($"Top-right square frames: {hits.Count} (sorted by screen area)");
+    foreach (var h in hits.OrderBy(x => (x.r - x.l) * (x.b - x.t)))
+    {
+        var sw = h.r - h.l; var sh = h.b - h.t;
+        Console.WriteLine($"  0x{h.el:X16}  unscaled={h.w:F0}x{h.h:F0}  screen={sw:F0}x{sh:F0}  " +
+                          $"rect=({h.l:F0},{h.t:F0})-({h.r:F0},{h.b:F0})  local={h.local}  hier={h.hier}");
+    }
+
+    // Also dump map-element ancestry children (first 2 levels) for context.
+    Console.WriteLine("\nMapUiElement parents + their visible square children:");
+    foreach (var el in EnumerateMapUiElements(reader, inGameState).Take(2))
+    {
+        Console.WriteLine($"  map 0x{el:X}");
+        var par = SafePtr(reader, el + Poe2.UiElement.Parent);
+        for (var depth = 0; depth < 3 && par != 0; depth++)
+        {
+            DumpSquareChildren(reader, par, uiScale, winW, winH, indent: "    ");
+            par = SafePtr(reader, par + Poe2.UiElement.Parent);
+        }
+    }
+    return 0;
+}
+
+static void DumpSquareChildren(MemoryReader reader, nint parent, float uiScale, int winW, int winH, string indent)
+{
+    var first = SafePtr(reader, parent + Poe2.UiElement.Children);
+    if (first == 0 || !reader.TryReadStruct<nint>(parent + Poe2.UiElement.Children + 8, out var lastC)) return;
+    var n = ((long)lastC - (long)first) / 8;
+    if (n is <= 0 or > 256) return;
+    Console.WriteLine($"{indent}parent 0x{parent:X} children={n}:");
+    for (long k = 0; k < n; k++)
+    {
+        var c = SafePtr(reader, first + (nint)(k * 8));
+        if (c == 0) continue;
+        var (w, h) = ReadUiSize(reader, c);
+        if (w <= 0 || h <= 0) continue;
+        var (l, t, r, b) = ReadUiScreenRect(reader, c, uiScale, winW, winH);
+        var topRight = MapViewportLogic.IsTopRightMinimapRect(l, t, r, b, winW, winH);
+        if (!topRight && (r - l) > winW * 0.3f) continue;
+        Console.WriteLine($"{indent}  child[{k}] 0x{c:X}  {w:F0}x{h:F0}  rect=({l:F0},{t:F0})-({r:F0},{b:F0})  topRight={topRight}  vis={IsUiVisibleLocal(reader, c)}");
+    }
+}
+
+// ── Live map UI probe: both MapUiElements + MapParent + Poe2Live.ReadMap ───
+static int RunMapProbe(ProcessHandle process, MemoryReader reader)
+{
+    var (_, inGameState, areaInstance, _) = ResolveChain(process, reader);
+    if (inGameState == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var (winW, winH) = TryGameClientSize(process.ProcessId);
+    Console.WriteLine($"Game client ~{winW}x{winH}  AreaInstance 0x{areaInstance:X}\n");
+
+    DumpMapParent(reader, inGameState);
+
+    var live = new Poe2Live(reader, 0);
+    var map = live.ReadMap(inGameState, areaInstance, winW, winH);
+    Console.WriteLine($"ReadMap → mapVisible={map.IsLargeOpen}  miniVisible={map.Mini.Visible}");
+    Console.WriteLine($"         miniRect=({map.Mini.ScreenLeft:F1},{map.Mini.ScreenTop:F1})-({map.Mini.ScreenRight:F1},{map.Mini.ScreenBottom:F1})  size={map.Mini.ScreenWidth:F0}x{map.Mini.ScreenHeight:F0}");
+    Console.WriteLine($"         miniShift=({map.Mini.ShiftX:F1},{map.Mini.ShiftY:F1})  zoom={map.Mini.Zoom:F3}\n");
+
+    Console.WriteLine("MapUiElements (DefaultShift 0,-20, Zoom≈0.5) — toggle Tab and re-run to diff:");
+    var uiScale = winH / 1600f;
+    foreach (var el in EnumerateMapUiElements(reader, inGameState))
+    {
+        DumpMapElement(reader, el, winW, winH, uiScale);
+        DumpMapElementParents(reader, el, winW, winH, uiScale);
+    }
+
+    // Frame sibling + its children (inner map drawable).
+    var miniEl = EnumerateMapUiElements(reader, inGameState).OrderBy(el =>
+    {
+        var (w, h) = ReadUiSize(reader, el);
+        return w * h;
+    }).FirstOrDefault();
+    if (miniEl != 0)
+    {
+        var par = SafePtr(reader, miniEl + Poe2.UiElement.Parent);
+        var first = SafePtr(reader, par + Poe2.UiElement.Children);
+        if (first != 0 && reader.TryReadStruct<nint>(par + Poe2.UiElement.Children + 8, out var lastC))
+        {
+            var n = ((long)lastC - (long)first) / 8;
+            Console.WriteLine($"\nMinimap parent 0x{par:X} children ({n}):");
+            for (long k = 0; k < n && k < 8; k++)
+            {
+                var c = SafePtr(reader, first + (nint)(k * 8));
+                if (c == 0) continue;
+                DumpMapElement(reader, c, winW, winH, uiScale);
+                DumpSquareChildren(reader, c, uiScale, winW, winH, indent: "      ");
+            }
+        }
+    }
+
+    Console.WriteLine("\nTip: run  --map-watch  and press Tab open/closed to capture the toggling element.");
+    return 0;
+}
+
+static int RunMapWatch(ProcessHandle process, MemoryReader reader, int intervalMs)
+{
+    var (_, inGameState, areaInstance, _) = ResolveChain(process, reader);
+    if (inGameState == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var (winW, winH) = TryGameClientSize(process.ProcessId);
+    var uiScale = winH / 1600f;
+    var els = EnumerateMapUiElements(reader, inGameState).Take(2).ToArray();
+    if (els.Length < 2) { Console.Error.WriteLine("Expected 2 MapUiElements."); return 1; }
+    var elA = els[0]; var elB = els[1];
+
+    Console.WriteLine($"Watching map state every {intervalMs}ms — toggle Tab. Ctrl+C to stop.");
+    Console.WriteLine($"  A=0x{elA:X}  B=0x{elB:X}  client {winW}x{winH}\n");
+    Console.WriteLine($"{"time",-10} {"locA",5} {"locB",5} {"hA",5} {"hB",5} {"Aarea",8} {"Barea",8}  notes");
+    var prev = "";
+
+    while (true)
+    {
+        var locA = IsUiVisibleLocal(reader, elA);
+        var locB = IsUiVisibleLocal(reader, elB);
+        var hierA = IsUiHierarchicallyVisible(reader, elA);
+        var hierB = IsUiHierarchicallyVisible(reader, elB);
+        var rectA = ReadUiScreenRect(reader, elA, uiScale, winW, winH);
+        var rectB = ReadUiScreenRect(reader, elB, uiScale, winW, winH);
+        var areaA = (rectA.r - rectA.l) * (rectA.b - rectA.t);
+        var areaB = (rectB.r - rectB.l) * (rectB.b - rectB.t);
+        var notes = "";
+        if (locA && !locB) notes = "only A local";
+        else if (!locA && locB) notes = "only B local";
+        else if (locA && locB) notes = "BOTH local";
+        else notes = "neither local";
+        var line = $"{locA,5} {locB,5} {hierA,5} {hierB,5} {areaA,8:F0} {areaB,8:F0}";
+        var snap = line + notes;
+        if (snap != prev)
+        {
+            Console.WriteLine($"{DateTime.Now:HH:mm:ss} {line}  {notes}");
+            prev = snap;
+        }
+        Thread.Sleep(intervalMs);
+    }
+}
+
+static void DumpMapParent(MemoryReader reader, nint inGameState)
+{
+    var uiRoot = SafePtr(reader, inGameState + Poe2.InGameState.UiRoot);
+    Console.WriteLine($"UiRoot 0x{uiRoot:X}");
+    nint[] anchors = [uiRoot, SafePtr(reader, uiRoot + Poe2.UiElement.Parent), SafePtr(reader, inGameState + Poe2.InGameState.UiRootStructPtr)];
+    foreach (var anchor in anchors)
+    {
+        if (anchor == 0) continue;
+        var mapParent = SafePtr(reader, anchor + Poe2.ImportantUi.MapParentPtr);
+        if (mapParent == 0) continue;
+        var p50 = SafePtr(reader, mapParent + Poe2.MapParent.LargeMapPtr);
+        var p58 = SafePtr(reader, mapParent + Poe2.MapParent.MiniMapPtr);
+        Console.WriteLine($"  MapParent 0x{mapParent:X} (anchor 0x{anchor:X})  +0x50→0x{p50:X}  +0x58→0x{p58:X}");
+        if (p50 != 0) { var (w, h) = ReadUiSize(reader, p50); Console.WriteLine($"    +0x50 size {w:F0}x{h:F0}  localVis={IsUiVisibleLocal(reader, p50)}  hierVis={IsUiHierarchicallyVisible(reader, p50)}"); }
+        if (p58 != 0) { var (w, h) = ReadUiSize(reader, p58); Console.WriteLine($"    +0x58 size {w:F0}x{h:F0}  localVis={IsUiVisibleLocal(reader, p58)}  hierVis={IsUiHierarchicallyVisible(reader, p58)}"); }
+    }
+    Console.WriteLine();
+}
+
+static IEnumerable<nint> EnumerateMapUiElements(MemoryReader reader, nint inGameState)
+{
+    var uiRoot = SafePtr(reader, inGameState + Poe2.InGameState.UiRoot);
+    if (uiRoot == 0) yield break;
+    var trueRoot = SafePtr(reader, uiRoot + Poe2.UiElement.Parent);
+    var root = trueRoot != 0 && trueRoot != uiRoot ? trueRoot : uiRoot;
+    var queue = new Queue<nint>(); queue.Enqueue(root);
+    var visited = new HashSet<nint>();
+    var body = new byte[Poe2.MapUiElement.Zoom + 8];
+    while (queue.Count > 0 && visited.Count < 30000)
+    {
+        var el = queue.Dequeue();
+        if (el == 0 || !visited.Add(el)) continue;
+        var first = SafePtr(reader, el + Poe2.UiElement.Children);
+        if (first != 0 && reader.TryReadStruct<nint>(el + Poe2.UiElement.Children + 8, out var lastC))
+        {
+            var n = ((long)lastC - (long)first) / 8;
+            if (n is > 0 and <= 8192)
+                for (long k = 0; k < n; k++) queue.Enqueue(SafePtr(reader, first + (nint)(k * 8)));
+        }
+        if (reader.TryReadBytes(el, body) < body.Length) continue;
+        if (BitConverter.ToSingle(body, Poe2.MapUiElement.DefaultShift) != 0f) continue;
+        if (BitConverter.ToSingle(body, Poe2.MapUiElement.DefaultShift + 4) != -20f) continue;
+        var zoom = BitConverter.ToSingle(body, Poe2.MapUiElement.Zoom);
+        if (zoom is <= 0.05f or >= 8f) continue;
+        yield return el;
+    }
+}
+
+static void DumpMapElementParents(MemoryReader reader, nint el, int winW, int winH, float uiScale)
+{
+    var cur = SafePtr(reader, el + Poe2.UiElement.Parent);
+    for (var depth = 0; depth < 10 && cur != 0; depth++)
+    {
+        var (w, h) = ReadUiSize(reader, cur);
+        var (l, t, r, b) = ReadUiScreenRect(reader, cur, uiScale, winW, winH);
+        var topRight = MapViewportLogic.IsTopRightMinimapRect(l, t, r, b, winW, winH);
+        Console.WriteLine($"      parent[{depth}] 0x{cur:X16}  size={w:F0}x{h:F0}  rect=({l:F0},{t:F0})-({r:F0},{b:F0})  topRight={topRight}");
+        var par = SafePtr(reader, cur + Poe2.UiElement.Parent);
+        if (par == 0 || par == cur) break;
+        cur = par;
+    }
+}
+
+static void DumpMapElement(MemoryReader reader, nint el, int winW, int winH, float uiScale)
+{
+    reader.TryReadStruct<float>(el + Poe2.MapUiElement.Shift, out var sx);
+    reader.TryReadStruct<float>(el + Poe2.MapUiElement.Shift + 4, out var sy);
+    reader.TryReadStruct<float>(el + Poe2.MapUiElement.Zoom, out var zoom);
+    var (w, h) = ReadUiSize(reader, el);
+    var (l, t, r, b) = ReadUiScreenRect(reader, el, uiScale, winW, winH);
+    var (cl, ct, cr, cb) = MapViewportLogic.ResolveMinimapClipRect(l, t, r, b, winW, winH, uiScale);
+    var local = IsUiVisibleLocal(reader, el);
+    var hier = IsUiHierarchicallyVisible(reader, el);
+    Console.WriteLine($"  0x{el:X16}  size={w:F0}x{h:F0}  localVis={local}  hierVis={hier}  zoom={zoom:F3}  shift=({sx:F1},{sy:F1})");
+    Console.WriteLine($"    layoutRect=({l:F1},{t:F1})-({r:F1},{b:F1})  clipRect=({cl:F1},{ct:F1})-({cr:F1},{cb:F1})");
+}
+
+static (float w, float h) ReadUiSize(MemoryReader reader, nint el)
+{
+    reader.TryReadStruct<float>(el + Poe2.UiElement.SizeW, out var w);
+    reader.TryReadStruct<float>(el + Poe2.UiElement.SizeH, out var h);
+    return (w, h);
+}
+
+static bool IsUiVisibleLocal(MemoryReader reader, nint el)
+{
+    if (!reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var flags)) return false;
+    return (flags & (1u << Poe2.UiElement.FlagVisibleBit)) != 0;
+}
+
+static bool IsUiHierarchicallyVisible(MemoryReader reader, nint el)
+{
+    var cur = el;
+    for (var guard = 0; guard < 16 && cur != 0; guard++)
+    {
+        if (!IsUiVisibleLocal(reader, cur)) return false;
+        var par = SafePtr(reader, cur + Poe2.UiElement.Parent);
+        if (par == 0 || par == cur) break;
+        cur = par;
+    }
+    return true;
+}
+
+static (float l, float t, float r, float b) ReadUiScreenRect(MemoryReader reader, nint el, float uiScale, int winW, int winH)
+{
+    float x = 0f, y = 0f;
+    var cur = el;
+    for (var depth = 0; depth < 24 && cur != 0; depth++)
+    {
+        if (reader.TryReadStruct<float>(cur + Poe2.UiElement.RelativePos, out var rx)) x += rx;
+        if (reader.TryReadStruct<float>(cur + Poe2.UiElement.RelativePos + 4, out var ry)) y += ry;
+        var par = SafePtr(reader, cur + Poe2.UiElement.Parent);
+        if (par == 0 || par == cur) break;
+        cur = par;
+    }
+    var (w, h) = ReadUiSize(reader, el);
+    return MapViewportLogic.ClampScreenRect(x, y, w, h, uiScale, winW, winH);
+}
+
+static (int w, int h) TryGameClientSize(int pid)
+{
+    try
+    {
+        var p = System.Diagnostics.Process.GetProcessById(pid);
+        if (p.MainWindowHandle != 0 && Win32Rects.GetClientRect(p.MainWindowHandle, out var rc))
+            return (rc.Width, rc.Height);
+    }
+    catch { /* best effort */ }
+    return (1920, 1080);
 }
 
 // ── Discovery: large-map UI element + its visibility flag ───────────────────

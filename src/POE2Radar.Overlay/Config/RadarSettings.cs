@@ -12,7 +12,12 @@ public sealed class RadarSettings
 {
     // ── Feature flags (reserved for later phases; no behavior wired yet). ──
     public bool HideJunk { get; set; } = false;
+    // Legacy single flag — migrated once to the three layer-specific toggles below; not persisted after migrate.
     public bool ShowPath { get; set; } = false;
+    public bool PathTogglesMigrated { get; set; }
+    public bool ShowPathWorld { get; set; } = true;
+    public bool ShowPathMap { get; set; } = true;
+    public bool ShowPathMinimap { get; set; } = true;
     public bool UseCuratedLandmarks { get; set; } = true;
     public bool DrawAllLandmarkPaths { get; set; } = false;
 
@@ -141,7 +146,7 @@ public sealed class RadarSettings
         {
             if (!File.Exists(FilePath))
             {
-                var fresh = new RadarSettings();
+                var fresh = new RadarSettings { PathTogglesMigrated = true };
                 fresh.Save();
                 return fresh;
             }
@@ -219,6 +224,14 @@ public sealed class RadarSettings
         if (AutoNavPatterns is not null)
             for (var i = 0; i < AutoNavPatterns.Count; i++)
                 if (IsStaleExp(AutoNavPatterns[i])) { AutoNavPatterns[i] = precise; changed = true; }
+
+        // One-time: fold the legacy single ShowPath flag into per-layer toggles.
+        if (!PathTogglesMigrated)
+        {
+            ShowPathWorld = ShowPathMap = ShowPathMinimap = ShowPath;
+            PathTogglesMigrated = true;
+            changed = true;
+        }
 
         return changed;
     }
