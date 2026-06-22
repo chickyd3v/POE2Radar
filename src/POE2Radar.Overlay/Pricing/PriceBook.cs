@@ -83,6 +83,7 @@ public sealed class PriceBook
     private DateTime _lastFetchUtc = DateTime.MinValue;
     private string _league = "";
     private string? _leagueOverride;
+    private volatile string? _detectedLeague; // league name read from game memory (Poe2Live.LeagueName)
 
     public double ExPerDivine { get; private set; } = 1;
     public double ExPerChaos { get; private set; } = 1;
@@ -116,6 +117,17 @@ public sealed class PriceBook
         if (v == _leagueOverride) return;
         _leagueOverride = v;
         _lastFetchUtc = DateTime.MinValue; // force the next RefreshIfDue to re-fetch
+    }
+
+    /// <summary>Report the league read from game memory (Poe2Live.LeagueName, e.g. "HC Runes of Aldur").
+    /// When no manual override is set, this is what we price against — it disambiguates the softcore vs
+    /// hardcore league that poe2scout reports both as current. Triggers a re-fetch when it changes.</summary>
+    public void SetDetectedLeague(string? league)
+    {
+        var v = string.IsNullOrWhiteSpace(league) ? null : league.Trim();
+        if (v == _detectedLeague) return;
+        _detectedLeague = v;
+        if (_leagueOverride == null) _lastFetchUtc = DateTime.MinValue; // only matters when auto-detecting
     }
 
     /// <summary>Call periodically (cheap when not due). Kicks a background fetch when stale and not already running.</summary>
@@ -193,21 +205,36 @@ public sealed class PriceBook
         finally { _fetching = false; }
     }
 
-    /// <summary>Discover the current league name via poe2scout's /Leagues (its Value strings are exactly what
-    /// poe.ninja expects). A configured override wins; otherwise pick the current softcore league.</summary>
+    /// <summary>Resolve the league to price against. Precedence: (1) a manual override from settings;
+    /// (2) the league read from game memory (<see cref="SetDetectedLeague"/>) — validated against
+    /// poe2scout's /Leagues so we use its canonical Value casing, but used as-is if the list is
+    /// unreachable, since the in-game string already matches poe.ninja verbatim; (3) fallback to the
+    /// current softcore league from /Leagues. poe2scout's Value strings are exactly what poe.ninja expects.</summary>
     private async Task<string> ResolveLeagueAsync()
     {
         if (_leagueOverride != null) return _leagueOverride;
+        var detected = _detectedLeague;
+        List<ScoutLeague> leagues;
         try
         {
             var json = await Http.GetStringAsync("https://poe2scout.com/api/poe2/Leagues").ConfigureAwait(false);
-            var leagues = JsonSerializer.Deserialize<List<ScoutLeague>>(json, Json) ?? new();
-            var pick = leagues.FirstOrDefault(l => l.IsCurrent && !l.Value.StartsWith("HC", StringComparison.OrdinalIgnoreCase))
-                       ?? leagues.FirstOrDefault(l => l.IsCurrent)
-                       ?? leagues.FirstOrDefault();
-            return pick?.Value ?? "";
+            leagues = JsonSerializer.Deserialize<List<ScoutLeague>>(json, Json) ?? new();
         }
-        catch { return ""; }
+        catch
+        {
+            return detected ?? ""; // list unreachable — trust the in-game string (already poe.ninja-shaped)
+        }
+
+        if (detected != null)
+        {
+            var match = leagues.FirstOrDefault(l => string.Equals(l.Value, detected, StringComparison.OrdinalIgnoreCase));
+            return match?.Value ?? detected; // canonical casing if known, else the raw in-game name
+        }
+
+        var pick = leagues.FirstOrDefault(l => l.IsCurrent && !l.Value.StartsWith("HC", StringComparison.OrdinalIgnoreCase))
+                   ?? leagues.FirstOrDefault(l => l.IsCurrent)
+                   ?? leagues.FirstOrDefault();
+        return pick?.Value ?? "";
     }
 
     // Convert poe.ninja core.rates → our Exalted-per-Divine / Exalted-per-Chaos. rates are "units per

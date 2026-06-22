@@ -282,6 +282,7 @@ public static class Poe2
     /// +0x08 ptr InventoryStruct, +0x10 ptr (= +0x08 − 0x10, the fingerprint invariant).</summary>
     public static class ServerData
     {
+        public const int League = 0x21E0;  // ✓ live 2026-06-22 (--league) — std::wstring current league name, EXACTLY poe.ninja/poe2scout's Value (e.g. "HC Runes of Aldur", "Standard", "Hardcore"). The HC/SC prefix lets us auto-detect the price league.
         public const int PlayerServerDataVec = 0x48;  // ✓ StdVector<IntPtr>; [0] → ServerDataStructure
         public const int PlayerInventoriesVec = 0x320; // ✓ (on ServerDataStructure) StdVector<InventoryArrayStruct>
         public const int InvArrayStride = 0x18;        // ✓ sizeof(InventoryArrayStruct)

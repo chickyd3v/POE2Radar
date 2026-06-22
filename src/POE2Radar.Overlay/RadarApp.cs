@@ -1130,6 +1130,10 @@ public sealed class RadarApp : IDisposable
             _appliedLeague = _settings.GroundItems.League;
             _priceBook.SetLeagueOverride(_appliedLeague);
         }
+        // Auto-detect the league from game memory (HC vs SC) so prices match the character's actual
+        // league when no manual override is set. Cached per area in Poe2Live; SetDetectedLeague no-ops
+        // unless it changed (and triggers a re-fetch only while auto-detecting).
+        _priceBook.SetDetectedLeague(_live.LeagueName(areaInstance));
         _landmarks = _live.Landmarks(areaInstance); // cached per area in Poe2Live
 
         // Decide which mobs get an HP bar + their style ONCE here (rule resolve + colour parse) —

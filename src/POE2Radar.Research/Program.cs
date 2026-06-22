@@ -157,6 +157,9 @@ if (HasFlag(args, "--serverdata-diff"))
 if (HasFlag(args, "--serverdata"))
     return RunServerData(process, reader);
 
+if (HasFlag(args, "--league"))
+    return RunLeague(process, reader, TryGetStrArg(args, "--needle"));
+
 if (HasFlag(args, "--pagesnap"))
     return RunPageSnap(reader, TryGetStrArg(args, "--tag") ?? "atlas",
         TryGetHexArg(args, "--lo") ?? unchecked((nint)0x040100000000L), TryGetHexArg(args, "--hi") ?? unchecked((nint)0x040400000000L));
@@ -353,6 +356,7 @@ Console.WriteLine("  --rune-dump [--radius N]   dump nearby entities (path/compo
 Console.WriteLine("  --presence [--diff]        baseline (then --diff) player components to find the presence-radius float");
 Console.WriteLine("  --devtree [--port N]       browser-based live memory/UI/entity explorer (default port 7778)");
 Console.WriteLine("  --serverdata               dump ServerData (AreaInstance+0x580): strings + StdVector quest-list candidates");
+Console.WriteLine("  --league [--needle <str>]  find the league-name string (HC/SC) in ServerData for price auto-detect");
 Console.WriteLine("  --aob                      scan for IngameState via AOB patterns");
 return 0;
 
@@ -432,6 +436,104 @@ static int RunServerData(ProcessHandle process, MemoryReader reader)
     Console.WriteLine("Quest-flag hunt: run --serverdata (baseline), advance ONE quest step in-game,");
     Console.WriteLine("then run --serverdata-diff to print exactly which offsets changed.");
     return 0;
+}
+
+// ── League-name hunt ───────────────────────────────────────────────────────
+// Goal: find where the current LEAGUE name lives in memory (e.g. "HC Runes of Aldur"
+// / "Runes of Aldur" / "Hardcore") so we can auto-detect HC vs SC vs Standard for the
+// poe.ninja price lookup. Scans ServerData (AreaInstance+0x580) AND ServerDataStructure
+// (PlayerServerData vec[0], where inventories also live) for: (a) the literal needle bytes
+// in UTF-8 and UTF-16, read once over a big window; (b) std::wstring / std::string fields;
+// (c) qword pointers that point at a printable string. Reports the offset of every hit so a
+// stable field can be pinned. Default needles: "Aldur" + "Hardcore".
+static int RunLeague(ProcessHandle process, MemoryReader reader, string? needle)
+{
+    var (_, igs, ai, _) = ResolveChain(process, reader);
+    if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
+
+    var serverData = SafePtr(reader, ai + Poe2.AreaInstance.ServerDataPtr);
+    if (serverData == 0) { Console.Error.WriteLine("ServerData null."); return 1; }
+    var sdsVec = reader.ReadStruct<POE2Radar.Core.Game.StdVector>(serverData + Poe2.ServerData.PlayerServerDataVec);
+    var serverDataStruct = SafePtr(reader, (nint)sdsVec.First); // vec[0] → ServerDataStructure
+
+    var needles = string.IsNullOrWhiteSpace(needle)
+        ? new[] { "Aldur", "Hardcore", "Standard" }
+        : new[] { needle.Trim() };
+    Console.WriteLine($"ServerData 0x{serverData:X}  ServerDataStructure 0x{serverDataStruct:X}  InGameState 0x{igs:X}");
+    Console.WriteLine($"Needles: {string.Join(", ", needles.Select(n => $"\"{n}\""))}\n");
+
+    var bases = new (string Name, nint Addr)[]
+    {
+        ("ServerData", serverData),
+        ("ServerDataStructure", serverDataStruct),
+        ("InGameState", igs),
+        ("AreaInstance", ai),
+    };
+
+    foreach (var (name, baseAddr) in bases)
+    {
+        if (baseAddr == 0) continue;
+        const int window = 0x8000;
+        var buf = new byte[window];
+        var got = reader.TryReadBytes(baseAddr, buf);
+        if (got <= 0) { Console.WriteLine($"[{name}] read failed"); continue; }
+        Console.WriteLine($"=== {name} @ 0x{baseAddr:X}  ({got} bytes) ===");
+
+        // (a) literal needle search — embedded UTF-8 and UTF-16 within the window itself.
+        foreach (var n in needles)
+        {
+            var u8 = System.Text.Encoding.UTF8.GetBytes(n);
+            var u16 = System.Text.Encoding.Unicode.GetBytes(n);
+            for (var i = 0; i + u8.Length <= got; i++)
+                if (MatchAt(buf, i, u8))
+                    Console.WriteLine($"  +0x{i:X4}  UTF-8  embedded match \"{n}\" → \"{ReadAsciiRun(buf, i, got)}\"");
+            for (var i = 0; i + u16.Length <= got; i++)
+                if (MatchAt(buf, i, u16))
+                    Console.WriteLine($"  +0x{i:X4}  UTF-16 embedded match \"{n}\" → \"{reader.ReadStringUtf16(baseAddr + i, 48)}\"");
+        }
+
+        // (b)+(c) struct/pointer scan: at every 8-byte slot try std::wstring, then a pointer→string.
+        for (var off = 0; off + 24 <= got; off += 8)
+        {
+            var ws = ReadStdWString(reader, baseAddr + off);
+            if (LeagueLike(ws))
+                Console.WriteLine($"  +0x{off:X4}  std::wstring  \"{ws}\"{Flag(ws, needles)}");
+
+            var ptr = BitConverter.ToInt64(buf, off);
+            if ((ulong)ptr is > 0x10000 and < 0x7FFFFFFFFFFF)
+            {
+                var s8 = reader.ReadStringUtf8((nint)ptr, 64);
+                if (LeagueLike(s8))
+                    Console.WriteLine($"  +0x{off:X4}  ptr→UTF-8   0x{ptr:X} \"{s8}\"{Flag(s8, needles)}");
+                var s16 = reader.ReadStringUtf16((nint)ptr, 48);
+                if (LeagueLike(s16) && s16 != s8)
+                    Console.WriteLine($"  +0x{off:X4}  ptr→UTF-16  0x{ptr:X} \"{s16}\"{Flag(s16, needles)}");
+                // std::wstring whose buffer is via this pointer (len at +0x10 of the field, not target)
+                var wsPtr = ReadStdWString(reader, (nint)ptr);
+                if (LeagueLike(wsPtr) && wsPtr != s16 && wsPtr != s8)
+                    Console.WriteLine($"  +0x{off:X4}  ptr→wstring 0x{ptr:X} \"{wsPtr}\"{Flag(wsPtr, needles)}");
+            }
+        }
+        Console.WriteLine();
+    }
+    return 0;
+
+    static bool MatchAt(byte[] b, int i, byte[] n)
+    {
+        for (var k = 0; k < n.Length; k++) if (b[i + k] != n[k]) return false;
+        return true;
+    }
+    static string ReadAsciiRun(byte[] b, int start, int len)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (var i = start; i < len && b[i] is >= 0x20 and < 0x7f && sb.Length < 48; i++) sb.Append((char)b[i]);
+        return sb.ToString();
+    }
+    static bool LeagueLike(string? s) =>
+        !string.IsNullOrEmpty(s) && s!.Length is >= 3 and <= 48 &&
+        s.Count(char.IsLetter) >= 3 && s.All(c => c is >= ' ' and < (char)0x7f);
+    static string Flag(string s, string[] needles) =>
+        needles.Any(n => s.Contains(n, StringComparison.OrdinalIgnoreCase)) ? "   <<< MATCH" : "";
 }
 
 // ── Inspect a StdVector inside ServerData (e.g. the quest-states vector at +0x23C8) ──

@@ -121,7 +121,10 @@ is rescaled by liveZoom/calibZoom each frame. See `resources/atlas-research-note
   (visible = bit `0x0B`); MapUiElement Shift `+0x368`, DefaultShift `+0x370` (= (0,-20)), Zoom `+0x3A8`.
 - Inventory (✓ live, Research `--inventory`): `AreaInstance +0x580` → ServerData → `+0x48` PlayerServerData
   vec `[0]` → ServerDataStructure → `+0x320` PlayerInventories vec (InventoryArrayStruct stride `0x18`:
-  `+0x00` id, `+0x08` → InventoryStruct, `+0x10` = ptr−0x10 fingerprint). InventoryStruct: TotalBoxes(X,Y)
+  `+0x00` id, `+0x08` → InventoryStruct, `+0x10` = ptr−0x10 fingerprint). ServerData `+0x21E0` =
+  std::wstring **current league name** (✓ live 2026-06-22, Research `--league`) — verbatim
+  poe.ninja/poe2scout `Value` incl. the "HC " prefix (e.g. "HC Runes of Aldur"), so it auto-detects the
+  HC vs SC price league. InventoryStruct: TotalBoxes(X,Y)
   `+0x150`, ItemList vec(ptr→InventoryItemStruct, len X·Y) `+0x170`. InventoryItemStruct: Item entity
   `+0x00`, Slot `+0x08`. Item = Entity; Mods rarity `+0x94`/identified `+0x90`, affix vecs Implicit `+0xA0`/
   Explicit `+0xB8`/Enchant `+0xD0` (ModArrayStruct stride `0x40`, `+0x28` → Mods.dat row → first qword →

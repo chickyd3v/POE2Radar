@@ -634,7 +634,7 @@ internal static class DashboardHtml
               <input class="numin" type="number" step="1" min="0" data-gi="highlightMinEx"></div>
             <div class="row"><div class="rl">Min listing quantity<small>skip low-confidence mislistings</small></div>
               <input class="numin" type="number" step="1" min="0" data-gi="minQuantity"></div>
-            <div class="row"><div class="rl">League<small>blank = auto-detect current</small></div>
+            <div class="row"><div class="rl">League<small>blank = auto-detect from game (HC/SC)</small></div>
               <input class="numin" type="text" data-gi="league" style="width:150px"></div>
             <div class="row"><div class="rl hint-row">Unidentified uniques reveal their NAME + value; everything else (identified uniques, currency, runes, essences, …) shows the value only.</div></div>
           </div>

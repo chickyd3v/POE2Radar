@@ -155,6 +155,20 @@ public sealed class Poe2Live
         return _areaCode;
     }
 
+    private string _league = ""; private nint _leagueFor = -1;
+
+    /// <summary>Current league name as the game stores it (ServerData @ AreaInstance+0x580 → std::wstring
+    /// +0x21E0). Matches poe.ninja/poe2scout's league Value verbatim, including the "HC " prefix — so it
+    /// disambiguates the two IsCurrent leagues (softcore vs hardcore) for price auto-detect. Cached per area.</summary>
+    public string LeagueName(nint areaInstance)
+    {
+        if (areaInstance == _leagueFor) return _league;
+        _leagueFor = areaInstance;
+        var serverData = Ptr(areaInstance + Poe2.AreaInstance.ServerDataPtr);
+        _league = serverData == 0 ? "" : ReadStdWString(serverData + Poe2.ServerData.League);
+        return _league;
+    }
+
     private nint _plPlayer, _plPlayerFor;
     private nint PlayerComp(nint localPlayer)
     {
