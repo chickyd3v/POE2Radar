@@ -18,14 +18,18 @@ public readonly record struct NavTarget(string Id, string Name, NumVec2 Grid, st
 public readonly record struct LegendEntry(NavTarget Target, int ColorSlot, bool IsSelected);
 
 /// <summary>One selected target's smoothed A* route: the selection-order color slot (0..7) used to pick
-/// its draw/legend color and the smoothed grid-cell waypoints. Empty <see cref="Points"/> = no path.</summary>
-public readonly record struct SelectedPath(int ColorSlot, IReadOnlyList<(int x, int y)> Points);
+/// its draw/legend color and the smoothed grid-cell waypoints. <see cref="LiveGoal"/> is refreshed at
+/// render rate for moving entity targets (appended as a tail segment). Empty <see cref="Points"/> = no path.</summary>
+public readonly record struct SelectedPath(
+    int ColorSlot,
+    IReadOnlyList<(int x, int y)> Points,
+    (int x, int y)? LiveGoal = null);
 
 /// <summary>A monster HP bar to draw, with everything expensive already decided at world rate: the style
-/// (width + packed 0xAARRGGBB fill/border colors) was resolved once when the entity set was built; only
-/// <see cref="World"/> + <see cref="Frac"/> are refreshed live every render frame (cheap per-entity reads)
-/// so the bar tracks the moving monster smoothly. The renderer just projects + fills.</summary>
-public readonly record struct HpBarTarget(Vector3 World, float Frac, float Width, uint Fill, float BorderWidth, uint Border);
+/// (width + packed 0xAARRGGBB fill/border colors) was resolved once when the entity set was built;
+/// <see cref="ScreenX"/>/<see cref="ScreenY"/> are eased in screen space (snapped while the camera moves)
+/// and <see cref="Frac"/> is refreshed live. The renderer just fills at the precomputed screen anchor.</summary>
+public readonly record struct HpBarTarget(float ScreenX, float ScreenY, float Frac, float Width, uint Fill, float BorderWidth, uint Border);
 
 /// <summary>A priced ground-item label drawn over the in-world loot icon. <see cref="World"/> is the
 /// dropped item's world position (projected via the camera matrix, like HP bars). <see cref="Name"/> is
@@ -104,11 +108,8 @@ public sealed record RenderContext(
     int WindowWidth,
     int WindowHeight,
     NumVec2 PlayerGrid,
-    // Live (render-rate) player world position incl. Z; anchors the world-ground guidance line at the
-    // player's feet. Null when unavailable (not in game / read failed). NOT from the entity list (the
-    // local player is filtered out of that), so it's correct even when alive/dead state changes.
     Vector3? PlayerWorld,
-    Poe2Live.MapUi Map,
+    Poe2Live.MapState Map,
     IReadOnlyList<Poe2Live.EntityDot> Entities,
     IReadOnlyList<Poe2Live.Landmark> Landmarks,
     uint AreaHash,
@@ -130,7 +131,9 @@ public sealed record RenderContext(
     // ── Phase 1 features (all gated by their settings flag below). ──
     // Feature flags mirrored from RadarSettings.
     bool HideJunk,
-    bool ShowPath,
+    bool ShowPathWorld,
+    bool ShowPathMap,
+    bool ShowPathMinimap,
     bool UseCuratedLandmarks,
     // Radar display toggles.
     bool ShowMonsters,
@@ -152,8 +155,8 @@ public sealed record RenderContext(
     // ── User-tweakable icon style table + HP-bar geometry (mirrored from RadarSettings). ──
     RadarStyles Styles,
     HpBarSettings HpBars,
-    // Monster HP bars: style decided at world rate, position/HP refreshed live each render frame so bars
-    // track moving mobs smoothly. Null/empty → none. Replaces the old per-frame resolve over all entities.
+    // Monster HP bars: style at world rate, screen anchor eased in RadarApp (snapped while camera moves).
+    // Null/empty → none.
     IReadOnlyList<HpBarTarget>? HpBarTargets,
     // Walkable-terrain bitmap colors/transparency (mirrored from RadarSettings).
     TerrainSettings TerrainStyle,

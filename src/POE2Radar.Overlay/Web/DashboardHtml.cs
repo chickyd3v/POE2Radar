@@ -536,11 +536,15 @@ internal static class DashboardHtml
               <label class="sw"><input type="checkbox" data-set="alwaysShowOverlay"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Hide junk entities<small>suppress cosmetic / FX / daemon dots</small></div>
               <label class="sw"><input type="checkbox" data-set="hideJunk"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Navigation paths<small>draw A&#42; routes to selected landmarks</small></div>
-              <label class="sw"><input type="checkbox" data-set="showPath"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Path on ground<small>world-projected route when the large map is closed</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPathWorld"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Path on large map<small>route overlay when Tab map is open</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPathMap"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Path on minimap<small>route inside the corner minimap</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPathMinimap"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Curated landmark names<small>community labels (boss / reward / exits)</small></div>
               <label class="sw"><input type="checkbox" data-set="useCuratedLandmarks"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Overlay FPS cap<small>lower = less load on the game; 60 is smooth for a radar (15&ndash;360)</small></div>
+            <div class="row"><div class="rl">Overlay FPS cap<small>match your monitor (72/144); world reads stay ~30&nbsp;Hz (15&ndash;360)</small></div>
               <input class="numin" type="number" step="1" min="15" max="360" data-set="fpsCap"></div>
           </div>
           <div class="card">
@@ -621,6 +625,18 @@ internal static class DashboardHtml
             <div class="row"><div class="rl">Mana cooldown<small>min ms between mana taps</small></div>
               <input class="numin" type="number" step="100" min="0" data-set="manaCooldownMs"></div>
             <div class="row"><div class="rl hint-row">F8 toggles auto-flask in-game. Status: <span id="flaskState">&mdash;</span></div></div>
+          </div>
+          <div class="card">
+            <h3>Game Patches <span class="tag">&middot; memory writes</span></h3>
+            <div class="row"><div class="rl hint-row">AOB-scanned byte patches (ported from GameHelper2). All off by default; original bytes restore on exit. <b>Use at your own risk</b> &mdash; may violate PoE2 ToS.</div></div>
+            <div class="row"><div class="rl">No atlas fog<small>removes fog of war on the atlas</small></div>
+              <label class="sw"><input type="checkbox" data-patch="noAtlasFog"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Infinite zoom<small>removes the zoom-out clamp</small></div>
+              <label class="sw"><input type="checkbox" data-patch="infiniteZoom"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Player light<small>increases light radius</small></div>
+              <label class="sw"><input type="checkbox" data-patch="playerLightRadius"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Light radius<small>100&ndash;50000 (default 2000)</small></div>
+              <input class="numin" type="number" step="100" min="100" max="50000" data-patch="playerLightRadiusValue"></div>
           </div>
           <div class="card">
             <h3>Ground Item Pricing <span class="tag">&middot; poe.ninja</span></h3>
@@ -735,8 +751,28 @@ async function loadSettings(){
     gi = s.groundItems || {};
     mono = s.monoliths || {};
     ce = s.currencyExchange || {};
-    renderHpBars(); renderTerrain(); renderGround(); renderMono(); renderExchange();
+    patches = s.patches || {};
+    renderHpBars(); renderTerrain(); renderGround(); renderMono(); renderExchange(); renderPatches();
   }catch(e){}
+}
+
+/* ── game byte patches (nested object: POST the whole {patches}) ── */
+let patches = null;
+function renderPatches(){
+  if(!patches) return;
+  $$('[data-patch]').forEach(el=>{
+    const k=el.dataset.patch;
+    if(el.type==='checkbox') el.checked=!!patches[k];
+    else if(patches[k]!==undefined && patches[k]!==null) el.value=patches[k];
+  });
+}
+function savePatches(){ if(patches) saveSetting('patches', patches); }
+function wirePatches(){
+  $$('[data-patch]').forEach(el=>{
+    const k=el.dataset.patch;
+    if(el.type==='checkbox') el.onchange=()=>{ patches=patches||{}; patches[k]=el.checked; savePatches(); };
+    else el.onchange=()=>{ const v=parseFloat(el.value); if(!isNaN(v)){ patches=patches||{}; patches[k]=v; savePatches(); } };
+  });
 }
 
 /* ── ground-item pricing (nested object: POST the whole {groundItems}) ── */
@@ -1512,7 +1548,7 @@ async function checkVersion(){
   }catch(e){}
 }
 
-wireSettings(); wireHpBars(); wireTerrain(); wireGround(); wireMono(); wireExchange();
+wireSettings(); wireHpBars(); wireTerrain(); wireGround(); wireMono(); wireExchange(); wirePatches();
 loadIcons().then(()=>{ loadSettings(); loadFilters(); }); // Rules is the default tab
 tick(); setInterval(tick, 1000);
 checkVersion();

@@ -4,4 +4,8 @@
     <Project Path="src/POE2Radar.Overlay/POE2Radar.Overlay.csproj" />
     <Project Path="src/POE2Radar.Research/POE2Radar.Research.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/POE2Radar.Core.Tests/POE2Radar.Core.Tests.csproj" />
+    <Project Path="tests/POE2Radar.Overlay.Tests/POE2Radar.Overlay.Tests.csproj" />
+  </Folder>
 </Solution>

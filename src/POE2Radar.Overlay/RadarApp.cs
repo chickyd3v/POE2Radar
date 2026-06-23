@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using NumVec2 = System.Numerics.Vector2;
 using POE2Radar.Core;
+using POE2Radar.Core.Cheats;
 using POE2Radar.Core.Game;
 using POE2Radar.Overlay.Config;
 using POE2Radar.Overlay.Input;
@@ -51,6 +53,7 @@ public sealed class RadarApp : IDisposable
     private readonly LandmarkStore _landmarkStore;
     private readonly ModCatalog _modCatalog;
     private readonly Pricing.PriceBook _priceBook;
+    private readonly CheatManager _cheats;
     private int _landmarkGen;
     private int _displayRulesGen;
     private int _landmarkStoreGen;
@@ -157,6 +160,10 @@ public sealed class RadarApp : IDisposable
     // reads (via the spec's captured addresses) so bars track moving monsters smoothly without re-walking.
     private readonly record struct HpBarSpec(nint Entity, nint Render, nint Life, float Width, uint Fill, float BorderWidth, uint Border);
     private readonly List<HpBarTarget> _hpFrame = new();   // render-thread scratch (rebuilt per frame)
+    private readonly HpBarScreenSmoother _hpSmooth = new();
+    private readonly Stopwatch _hpSmoothClock = Stopwatch.StartNew();
+    private readonly HashSet<nint> _hpActive = new();
+    private uint _hpSmoothAreaHash;
     // Ground-item label SPEC (world rate): the priced facts + the item's Render component address. Its
     // live world position is re-read every RENDER frame into _itemFrame so the label tracks smoothly
     // (dropped items bob, so a 30 Hz-sampled position aliases/jitters when projected at render rate —
@@ -268,6 +275,10 @@ public sealed class RadarApp : IDisposable
         _reader = reader;
         _settings = RadarSettings.Load();
         _autoFlask = _settings.AutoFlaskEnabled;   // restore the persisted F8 state (default ON)
+        _cheats = new CheatManager(process, reader);
+        Console.WriteLine("Scanning game patch patterns...");
+        _cheats.ScanAndResolve();
+        _cheats.SyncFrom(_settings.Patches);
         Console.WriteLine($"Settings: {RadarSettings.FilePath}");
         Console.WriteLine($"Entity names: {EntityNameResolver.Shared.Count} mappings; zones: {ZoneGuide.Shared.Count}");
         _live = new Poe2Live(reader, gameStateSlot);
@@ -521,7 +532,7 @@ public sealed class RadarApp : IDisposable
         Console.WriteLine($"Hidden entities: {_hidden.Count} pattern(s); display rules: {_displayRules.Count}; known mods: {_modCatalog.Count}");
         _api = new ApiServer(() => _state, _settings, GetNavSelection, ToggleNavTarget, ClearNavSelection,
                              _hidden, _displayRules, _landmarkStore, CurrentTilePaths, () => _modCatalog.All, PricesJson, AtlasJson, SetAtlasSelection,
-                             SetAtlasHighlight, VersionJson, _settings.ApiPort);
+                             SetAtlasHighlight, VersionJson, _cheats, _settings.ApiPort);
         try { _api.Start(); Console.WriteLine($"API on http://localhost:{_settings.ApiPort} (dashboard at /)"); }
         catch (Exception ex) { Console.Error.WriteLine($"API server disabled: {ex.Message}"); }
         Console.WriteLine("Hotkeys: F6=add nearest path target  F7=clear path targets  "
@@ -1001,7 +1012,7 @@ public sealed class RadarApp : IDisposable
         var inGame = _liveRender.TryResolve(out var inGameState, out var areaInstance, out var localPlayer);
         var player = NumVec2.Zero;
         POE2Radar.Core.Game.Vector3? playerWorld = null;   // live player feet (incl. Z) for the world-ground route anchor
-        var map = default(Poe2Live.MapUi);
+        var map = Poe2Live.MapState.Empty;
         // Atlas routes/markers re-read per frame (positions from node elements) so they track pan at full FPS.
         NumVec2? atlasStart = null, atlasEnd = null, atlasCurrent = null;
         List<NumVec2>? atlasRoute = null;
@@ -1025,22 +1036,40 @@ public sealed class RadarApp : IDisposable
 
             player = _liveRender.PlayerGrid(localPlayer) ?? NumVec2.Zero;
             playerWorld = _liveRender.PlayerWorld(localPlayer);   // same Render read PlayerGrid uses; live each frame
-            map = _liveRender.ReadMap(inGameState, areaInstance);
+            map = _liveRender.ReadMap(inGameState, areaInstance, _window.Width, _window.Height);
+            RefreshMapDiagnostics(map);
             // Player name reads a StdWString (allocates a string) — read it only when the local-player
             // pointer changes (i.e. once per session), not every render frame.
             if (localPlayer != _charNameFor) { _charNameFor = localPlayer; _charName = _liveRender.PlayerName(localPlayer); }
             _cameraMatrix = _liveRender.CameraMatrix(inGameState);
             TickAutoFlask(localPlayer);
 
-            // Refresh each HP-bar mob's live position + HP from the world tick's spec (which captured the
-            // mob's Render/Life component addresses) using the RENDER reader — so bars track moving mobs
-            // smoothly with no shared cache. Cheap: two tiny reads per bar, only the ~dozens of bar mobs.
-            _hpFrame.Clear();
-            foreach (var spec in snap.HpSpecs)
+            if (snap.AreaHash != _hpSmoothAreaHash)
             {
-                if (!_liveRender.TryLiveBarAt(spec.Render, spec.Life, out var w, out var cur, out var max) || max <= 0 || cur <= 0) continue;
-                _hpFrame.Add(new HpBarTarget(w, Math.Clamp((float)cur / max, 0f, 1f), spec.Width, spec.Fill, spec.BorderWidth, spec.Border));
+                _hpSmoothAreaHash = snap.AreaHash;
+                _hpSmooth.Clear();
             }
+
+            var hpDt = (float)Math.Clamp(_hpSmoothClock.Elapsed.TotalSeconds, 0.001, 0.1);
+            _hpSmoothClock.Restart();
+            var hpCam = _cameraMatrix;
+            var hpSnap = hpCam is null || _hpSmooth.CameraMoved(hpCam);
+
+            _hpFrame.Clear();
+            _hpActive.Clear();
+            if (hpCam is not null)
+            {
+                var hpW = (float)_window.Width;
+                var hpH = (float)_window.Height;
+                foreach (var spec in snap.HpSpecs)
+                {
+                    if (!_liveRender.TryLiveBarAt(spec.Render, spec.Life, out var w, out var cur, out var max) || max <= 0 || cur <= 0) continue;
+                    if (!_hpSmooth.TryUpdate(spec.Entity, w, hpCam, hpW, hpH, hpDt, hpSnap, out var sx, out var sy)) continue;
+                    _hpActive.Add(spec.Entity);
+                    _hpFrame.Add(new HpBarTarget(sx, sy, Math.Clamp((float)cur / max, 0f, 1f), spec.Width, spec.Fill, spec.BorderWidth, spec.Border));
+                }
+            }
+            _hpSmooth.Prune(_hpActive);
 
             // Ground-item labels: re-read each priced item's live world position THIS frame (dropped items
             // bob), so the renderer projects a current position — the same per-frame reposition that keeps
@@ -1096,7 +1125,15 @@ public sealed class RadarApp : IDisposable
                 }
             }
         }
-        else { if (_hpFrame.Count > 0) _hpFrame.Clear(); if (_itemFrame.Count > 0) _itemFrame.Clear(); if (_lootTagFrame.Count > 0) _lootTagFrame.Clear(); if (_atlasMarkFrame.Count > 0) _atlasMarkFrame.Clear(); }
+        else
+        {
+            if (_hpFrame.Count > 0) _hpFrame.Clear();
+            if (_itemFrame.Count > 0) _itemFrame.Clear();
+            if (_lootTagFrame.Count > 0) _lootTagFrame.Clear();
+            if (_atlasMarkFrame.Count > 0) _atlasMarkFrame.Clear();
+            _hpSmooth.Clear();
+            _hpSmoothAreaHash = 0;
+        }
 
         // Zone-load guard: the world snapshot lags the live chain by up to one world pass, so right after a
         // zone change its entities/terrain/route still belong to the PREVIOUS area. Only draw them once the
@@ -1115,9 +1152,13 @@ public sealed class RadarApp : IDisposable
         var monoliths = worldFresh && mr.AreaHash == _areaHash
             ? mr.Markers : (IReadOnlyList<MonolithMarker>)Array.Empty<MonolithMarker>();
 
-        _state = new RadarState(inGame, snap.AreaHash, snap.AreaLevel, map.IsVisible, map.Zoom, player,
+        _state = new RadarState(inGame, snap.AreaHash, snap.AreaLevel, map.IsLargeOpen, map.Large.Zoom, player,
             snap.Entities, snap.Landmarks, _hpPct, _manaPct, _esPct, _autoFlask, _flaskNote,
-            snap.AreaCode, _charName, snap.CharLevel, _worldMs, _renderMs, mr.Markers, _fps,
+            snap.AreaCode, _charName, snap.CharLevel, _worldMs, _renderMs,
+            monoliths, _fps,
+            map.Mini.Visible && map.Mini.HasScreenRect,
+            map.Mini.ScreenLeft, map.Mini.ScreenTop, map.Mini.ScreenRight, map.Mini.ScreenBottom,
+            _window.Width, _window.Height,
             ex.Open, ex.Summary, ex.Offered, ex.Wanted, ex.HaveQty, ex.FillNote);
 
         var realActive = _gameHwnd != 0 && GetForegroundWindow() == _gameHwnd;
@@ -1147,7 +1188,9 @@ public sealed class RadarApp : IDisposable
             CharLevel: snap.CharLevel,
             CameraMatrix: _cameraMatrix,
             HideJunk: _settings.HideJunk,
-            ShowPath: _settings.ShowPath,
+            ShowPathWorld: _settings.ShowPathWorld,
+            ShowPathMap: _settings.ShowPathMap,
+            ShowPathMinimap: _settings.ShowPathMinimap,
             UseCuratedLandmarks: _settings.UseCuratedLandmarks,
             ShowMonsters: _settings.ShowMonsters,
             ShowTerrain: _settings.ShowTerrain,
@@ -2632,6 +2675,24 @@ public sealed class RadarApp : IDisposable
         catch (Exception ex) { Console.Error.WriteLine($"Open dashboard failed: {ex.Message}"); }
     }
 
+    private void RefreshMapDiagnostics(Poe2Live.MapState map)
+    {
+        var mini = map.Mini;
+        var prev = _state;
+        _state = prev with
+        {
+            MapVisible = map.IsLargeOpen,
+            Zoom = map.Large.Zoom > 0 ? map.Large.Zoom : prev.Zoom,
+            MinimapVisible = mini.Visible && mini.HasScreenRect,
+            MinimapLeft = mini.ScreenLeft,
+            MinimapTop = mini.ScreenTop,
+            MinimapRight = mini.ScreenRight,
+            MinimapBottom = mini.ScreenBottom,
+            WindowWidth = _window.Width,
+            WindowHeight = _window.Height,
+        };
+    }
+
     private static bool Down(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
 
     [DllImport("user32.dll")]
@@ -2705,6 +2766,7 @@ public sealed class RadarApp : IDisposable
     {
         _shutdown = true;
         _worldThread?.Join(1000);   // let the background world loop observe _shutdown and exit
+        _cheats.RestoreAll();
         _modCatalog.Flush(); // persist any mods seen since the last debounced write
         _replanner.Dispose();
         _api.Dispose();

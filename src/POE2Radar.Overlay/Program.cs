@@ -20,6 +20,7 @@ if (slot == 0)
 
 Console.WriteLine();
 Console.WriteLine("Radar running. Open the in-game map to see terrain + entities.");
+Console.WriteLine("Dashboard: F12 or http://localhost:7777 — game patches are in Settings (all off by default).");
 Console.WriteLine("Atlas: open it in-game; rings are auto-positioned. F10 over a tile = inspect its map/content/biome.");
 Console.WriteLine("Ctrl+C to exit.");
 

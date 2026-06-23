@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using POE2Radar.Core.Cheats;
 using POE2Radar.Core.Game;
 using POE2Radar.Overlay.Config;
 
@@ -63,6 +64,7 @@ public sealed class ApiServer : IDisposable
     private readonly Action<IReadOnlyList<(string tag, string color, bool track, bool nav, bool arrow)>>? _atlasHighlight;
     // Version/update info provider ({current, latest, updateAvailable, url}) for the dashboard banner.
     private readonly Func<object>? _version;
+    private readonly CheatManager? _cheats;
     private volatile bool _running;
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -83,6 +85,7 @@ public sealed class ApiServer : IDisposable
         Action<IReadOnlyList<long>>? atlasSelect = null,
         Action<IReadOnlyList<(string tag, string color, bool track, bool nav, bool arrow)>>? atlasHighlight = null,
         Func<object>? versionProvider = null,
+        CheatManager? cheats = null,
         int port = 7777)
     {
         _state = state;
@@ -90,6 +93,7 @@ public sealed class ApiServer : IDisposable
         _atlasSelect = atlasSelect;
         _atlasHighlight = atlasHighlight;
         _version = versionProvider;
+        _cheats = cheats;
         _settings = settings;
         _navGet = navGet;
         _navToggle = navToggle;
@@ -151,6 +155,16 @@ public sealed class ApiServer : IDisposable
                     areaName = ZoneGuide.Shared.FriendlyName(s.AreaCode),
                     areaAct = ZoneGuide.Shared.Area(s.AreaCode)?.Act ?? 0,
                     mapVisible = s.MapVisible, zoom = s.Zoom,
+                    minimapVisible = s.MinimapVisible,
+                    minimapRect = new { left = s.MinimapLeft, top = s.MinimapTop, right = s.MinimapRight, bottom = s.MinimapBottom },
+                    mapDebug = new
+                    {
+                        largeOpen = s.MapVisible,
+                        miniW = s.MinimapRight - s.MinimapLeft,
+                        miniH = s.MinimapBottom - s.MinimapTop,
+                        windowW = s.WindowWidth,
+                        windowH = s.WindowHeight,
+                    },
                     hpPct = s.HpPct, manaPct = s.ManaPct, esPct = s.EsPct, autoFlask = s.AutoFlask, flask = s.FlaskNote,
                     player = new { x = s.Player.X, y = s.Player.Y },
                     entityCount = s.Entities.Count,
@@ -474,7 +488,9 @@ public sealed class ApiServer : IDisposable
     private object ReadSettings() => new
     {
         hideJunk = _settings.HideJunk,
-        showPath = _settings.ShowPath,
+        showPathWorld = _settings.ShowPathWorld,
+        showPathMap = _settings.ShowPathMap,
+        showPathMinimap = _settings.ShowPathMinimap,
         alwaysShowOverlay = _settings.AlwaysShowOverlay,
         useCuratedLandmarks = _settings.UseCuratedLandmarks,
         landmarkClusterGap = _settings.LandmarkClusterGap,
@@ -511,6 +527,8 @@ public sealed class ApiServer : IDisposable
         atlasContentIconSize = _settings.AtlasContentIconSize,
         atlasRouteArrowSpacing = _settings.AtlasRouteArrowSpacing,
         atlasGroups = _settings.AtlasGroups,
+        patches = _settings.Patches,
+        patchStatus = _cheats?.GetStatus(),
     };
 
     /// <summary>Apply only whitelisted radar/visual keys from a posted JSON object; persists on change.</summary>
@@ -528,7 +546,13 @@ public sealed class ApiServer : IDisposable
             switch (p.Name)
             {
                 case "hideJunk" when TryBool(p.Value, out var b): _settings.HideJunk = b; applied.Add(p.Name); break;
-                case "showPath" when TryBool(p.Value, out var b): _settings.ShowPath = b; applied.Add(p.Name); break;
+                case "showPathWorld" when TryBool(p.Value, out var b): _settings.ShowPathWorld = b; applied.Add(p.Name); break;
+                case "showPathMap" when TryBool(p.Value, out var b): _settings.ShowPathMap = b; applied.Add(p.Name); break;
+                case "showPathMinimap" when TryBool(p.Value, out var b): _settings.ShowPathMinimap = b; applied.Add(p.Name); break;
+                case "showPath" when TryBool(p.Value, out var b):
+                    _settings.ShowPathWorld = _settings.ShowPathMap = _settings.ShowPathMinimap = b;
+                    applied.Add("showPathWorld"); applied.Add("showPathMap"); applied.Add("showPathMinimap");
+                    break;
                 case "alwaysShowOverlay" when TryBool(p.Value, out var b): _settings.AlwaysShowOverlay = b; applied.Add(p.Name); break;
                 case "useCuratedLandmarks" when TryBool(p.Value, out var b): _settings.UseCuratedLandmarks = b; applied.Add(p.Name); break;
                 case "landmarkClusterGap" when TryInt(p.Value, out var n): _settings.LandmarkClusterGap = Math.Clamp(n, 0, 64); applied.Add(p.Name); break;
@@ -582,11 +606,18 @@ public sealed class ApiServer : IDisposable
                 case "atlasGroups" when p.Value.ValueKind == JsonValueKind.Array:
                     if (TryParseAtlasGroups(p.Value, out var grps)) { _settings.AtlasGroups = grps; _settings.AtlasGroupsSeeded = true; applied.Add(p.Name); }
                     break;
+                case "patches" when p.Value.ValueKind == JsonValueKind.Object:
+                    if (TryParsePatches(p.Value, out var patches)) { _settings.Patches = patches; applied.Add(p.Name); }
+                    break;
                 // Anything else (apiPort, unknown keys) is ignored by design.
             }
         }
 
-        if (applied.Count > 0) _settings.Save();
+        if (applied.Count > 0)
+        {
+            _settings.Save();
+            if (applied.Contains("patches")) _cheats?.SyncFrom(_settings.Patches);
+        }
         return applied.ToArray();
     }
 
@@ -766,6 +797,20 @@ public sealed class ApiServer : IDisposable
             if (parsed == null) return false;
             parsed.MaxRows = Math.Clamp(parsed.MaxRows, 1, 64);
             c = parsed;
+            return true;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool TryParsePatches(JsonElement el, out GamePatchSettings p)
+    {
+        p = new GamePatchSettings();
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<GamePatchSettings>(el.GetRawText(), Json);
+            if (parsed == null) return false;
+            parsed.PlayerLightRadiusValue = Math.Clamp(parsed.PlayerLightRadiusValue, 100f, 50000f);
+            p = parsed;
             return true;
         }
         catch (JsonException) { return false; }
@@ -1024,8 +1069,6 @@ public sealed record RadarState(
     string AreaCode,
     string CharName,
     int CharLevel,
-    // Threading validation timers: the last world-pass duration (background thread) and the last
-    // render-frame duration (render thread), in milliseconds. Surfaced via /state for stress-testing.
     float WorldMs = 0,
     float RenderMs = 0,
     // Runeshape monoliths in the current area (slot count, anchor, best value + full priced reward set) —
@@ -1033,6 +1076,13 @@ public sealed record RadarState(
     IReadOnlyList<MonolithMarker>? Monoliths = null,
     // Measured effective render FPS (rolling window) — for verifying the overlay actually hits FpsCap.
     float Fps = 0,
+    bool MinimapVisible = false,
+    float MinimapLeft = 0,
+    float MinimapTop = 0,
+    float MinimapRight = 0,
+    float MinimapBottom = 0,
+    int WindowWidth = 0,
+    int WindowHeight = 0,
     // Currency-exchange live order book (when the exchange panel is open): per-side ladder rows + summary.
     bool ExchangeOpen = false,
     string ExchangeSummary = "",

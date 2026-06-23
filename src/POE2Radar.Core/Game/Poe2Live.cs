@@ -84,7 +84,22 @@ public sealed class Poe2Live
         public float HpFraction => HpMax > 0 ? Math.Clamp((float)HpCur / HpMax, 0f, 1f) : 1f;
     }
 
-    public readonly record struct MapUi(bool IsVisible, float ShiftX, float ShiftY, float Zoom);
+    /// <summary>One map viewport (large Tab map or corner minimap): projection params + screen clip rect.</summary>
+    public readonly record struct MapViewport(
+        bool Visible, float ShiftX, float ShiftY, float Zoom,
+        float ScreenLeft, float ScreenTop, float ScreenRight, float ScreenBottom)
+    {
+        public bool HasScreenRect => ScreenRight > ScreenLeft + 1f && ScreenBottom > ScreenTop + 1f;
+        public float ScreenWidth => ScreenRight - ScreenLeft;
+        public float ScreenHeight => ScreenBottom - ScreenTop;
+    }
+
+    /// <summary>Large map + corner minimap UI state, discovered once per area.</summary>
+    public readonly record struct MapState(MapViewport Large, MapViewport Mini)
+    {
+        public static readonly MapState Empty = new(default, default);
+        public bool IsLargeOpen => Large.Visible;
+    }
 
     /// <summary>A static tile-based landmark: a notable terrain feature and its grid centroid.
     /// <paramref name="CuratedName"/> is an optional curated friendly label (null when none matches);
@@ -900,18 +915,17 @@ public sealed class Poe2Live
     private readonly HashSet<nint> _everHidden = new();  // elements observed with visible-bit clear
     private readonly HashSet<nint> _everVisible = new(); // elements observed with visible-bit set
     private nint _mapCacheKey = -1;
+    private nint _classifiedLargeEl;
+    private nint _classifiedMiniEl;
 
     /// <summary>
-    /// Map UI state. The MapUiElements (DefaultShift=(0,-20), Zoom=0.5) are discovered once per area
-    /// and cached — per frame we only read their flags/shift/zoom (cheap). The game exposes several:
-    /// some are always-on, some always-off, and one is the minimap viewport whose visible bit Tab
-    /// toggles. We gate "map open" on a *genuine toggler* — an element observed BOTH visible and
-    /// hidden — so a permanently-hidden element can't masquerade as the toggle signal (the bug that
-    /// pinned this to "closed" once the UI began exposing 4 elements instead of 2). Projection
-    /// params (shift/zoom) come from a currently-visible toggler. Until the first toggle is observed
-    /// this area, fall back to "more than the always-on baseline visible" (&gt;=2).
+    /// Large-map + corner-minimap UI state. PoE2 exposes exactly two MapUiElements (DefaultShift=(0,-20),
+    /// Zoom≈0.5). Live-validated (Research --map-probe): the corner widget has the smaller intrinsic size
+    /// and a stable ~225px screen rect; the Tab-map widget is client-sized (e.g. 3440×1440). GH2 MapParent
+    /// is not valid in PoE2 (+0x50 == +0x58). Tab open = local visible bit on the *corner* element (inverted
+    /// vs intuition); minimap clip always comes from the corner element's screen rect.
     /// </summary>
-    public MapUi ReadMap(nint inGameState, nint areaInstance)
+    public MapState ReadMap(nint inGameState, nint areaInstance, int windowWidth, int windowHeight)
     {
         if (areaInstance != _mapCacheKey || _mapEls.Count == 0)
         {
@@ -919,41 +933,266 @@ public sealed class Poe2Live
             _mapEls.Clear();
             _everHidden.Clear();
             _everVisible.Clear();
+            _classifiedLargeEl = _classifiedMiniEl = 0;
             DiscoverMapElements(inGameState);
         }
 
-        var visibleCount = 0;
-        var any = false; MapUi anyUi = default;
-        var sawToggler = false; var togglerVisible = false; var haveTogglerUi = false; MapUi togglerUi = default;
+        ClassifyMapPair();
+
+        var uiScale = windowHeight > 0 ? windowHeight / 1600f : 1f;
+
+        // ── Tab large map: corner element local-vis (live-validated toggle signal).
+        MapViewport large = default;
+        if (_classifiedMiniEl != 0
+            && TryReadMapElement(_classifiedMiniEl, out var cornerLocal, out _, out var csx, out var csy, out var czoom))
+        {
+            var tabOpen = MapViewportLogic.IsTabMapOpen(cornerLocal);
+            if (!tabOpen && _classifiedLargeEl != 0
+                && TryReadMapElement(_classifiedLargeEl, out var fullLocal, out _, out var fsx, out var fsy, out var fzoom))
+            {
+                large = new MapViewport(false, fsx, fsy, fzoom, 0, 0, 0, 0);
+            }
+            else
+                large = new MapViewport(tabOpen, csx, csy, czoom, 0, 0, 0, 0);
+        }
+        else
+            large = FallbackLargeMapViewport();
+
+        // ── Corner minimap: only while Tab map is closed; clip rect from the square frame sibling
+        // (live --map-scan-frames), not the 0×0 MapUiElement's parent-chain rect.
+        MapViewport mini = default;
+        if (!large.Visible && _classifiedMiniEl != 0
+            && TryReadActiveMapProjection(_classifiedMiniEl, _classifiedLargeEl, out var msx, out var msy, out var mzoom))
+        {
+            float cl, ct, cr, cb;
+            if (!TryReadMinimapFrameRect(
+                    _classifiedMiniEl, uiScale, windowWidth, windowHeight, out _, out cl, out ct, out cr, out cb))
+            {
+                var rect = ReadElementScreenRect(_classifiedMiniEl, uiScale, windowWidth, windowHeight);
+                (cl, ct, cr, cb) = MapViewportLogic.ResolveMinimapClipRect(
+                    rect.left, rect.top, rect.right, rect.bottom, windowWidth, windowHeight, uiScale);
+            }
+
+            mini = new MapViewport(true, msx, msy, mzoom, cl, ct, cr, cb);
+
+            if (mini.Zoom > 0.05f)
+                mini = mini with { Visible = true };
+        }
+
+        return new MapState(large, mini);
+    }
+
+    /// <summary>Assign Tab-map vs corner-minimap from intrinsic UiElement size (MapParent is not valid in PoE2).</summary>
+    private void ClassifyMapPair()
+    {
+        if (_classifiedLargeEl != 0 && _classifiedMiniEl != 0) return;
+        if (_mapEls.Count < 2) return;
+
+        nint bestLarge = 0, bestMini = 0;
+        var bestArea = -1f;
         foreach (var el in _mapEls)
         {
-            if (!TryReadMapElement(el, out var vis, out var sx, out var sy, out var zoom)) continue;
-            if (vis) { _everVisible.Add(el); visibleCount++; } else _everHidden.Add(el);
-            if (!any) { any = true; anyUi = new MapUi(vis, sx, sy, zoom); }
+            var (w, h) = ReadElementIntrinsicArea(el);
+            var area = w * h;
+            if (area > bestArea) { bestArea = area; bestLarge = el; }
+        }
 
-            // A genuine toggler has been seen in BOTH states; permanently-on/off elements never qualify.
+        foreach (var el in _mapEls)
+        {
+            if (el == bestLarge) continue;
+            bestMini = el;
+            break;
+        }
+
+        if (bestLarge != 0 && bestMini != 0)
+        {
+            _classifiedLargeEl = bestLarge;
+            _classifiedMiniEl = bestMini;
+        }
+    }
+
+    private (float w, float h) ReadElementIntrinsicArea(nint el)
+    {
+        _reader.TryReadStruct<float>(el + Poe2.UiElement.SizeW, out var w);
+        _reader.TryReadStruct<float>(el + Poe2.UiElement.SizeH, out var h);
+        if (w <= 0f || h <= 0f) { w = 250f; h = 250f; }
+        return (w, h);
+    }
+
+    /// <summary>v0.8.2 toggler fallback when the two-element classification is not ready yet.</summary>
+    private MapViewport FallbackLargeMapViewport()
+    {
+        var visibleCount = 0;
+        var any = false;
+        MapViewport anyVp = default;
+        var sawToggler = false;
+        var togglerVisible = false;
+        var haveTogglerUi = false;
+        MapViewport togglerVp = default;
+
+        foreach (var el in _mapEls)
+        {
+            if (!TryReadMapElement(el, out var localVis, out _, out var sx, out var sy, out var zoom)) continue;
+            if (localVis) { _everVisible.Add(el); visibleCount++; } else _everHidden.Add(el);
+
+            var vp = new MapViewport(localVis, sx, sy, zoom, 0, 0, 0, 0);
+            if (!any) { any = true; anyVp = vp; }
+
             if (_everVisible.Contains(el) && _everHidden.Contains(el))
             {
                 sawToggler = true;
-                if (vis) togglerVisible = true;
-                if (vis || !haveTogglerUi) { togglerUi = new MapUi(vis, sx, sy, zoom); haveTogglerUi = true; }
+                if (el == _classifiedMiniEl && localVis) togglerVisible = true;
+                else if (_classifiedMiniEl == 0 && localVis) togglerVisible = true;
+                if (localVis || !haveTogglerUi) { togglerVp = vp; haveTogglerUi = true; }
             }
         }
+
         if (!any) return default;
+        if (sawToggler) return togglerVp with { Visible = togglerVisible };
+        return anyVp with { Visible = visibleCount >= 2 };
+    }
 
-        if (sawToggler)
-            return new MapUi(togglerVisible, togglerUi.ShiftX, togglerUi.ShiftY, togglerUi.Zoom);
+    /// <summary>GH2 MapParent (+0x738) — not valid in PoE2 live (both ptrs identical). Research only.</summary>
+    private bool TryMapParentElements(nint inGameState, out nint largeEl, out nint miniEl)
+    {
+        largeEl = miniEl = 0;
+        var uiRoot = Ptr(inGameState + Poe2.InGameState.UiRoot);
+        if (uiRoot == 0) return false;
 
-        // No toggle observed yet this area: the open minimap lights up one element beyond the
-        // always-on baseline, so >=2 visible ≈ open. Superseded as soon as a real toggle is seen.
-        return new MapUi(visibleCount >= 2, anyUi.ShiftX, anyUi.ShiftY, anyUi.Zoom);
+        var trueRoot = Ptr(uiRoot + Poe2.UiElement.Parent);
+        if (trueRoot == 0 || trueRoot == uiRoot) trueRoot = uiRoot;
+        var uiRootStruct = Ptr(inGameState + Poe2.InGameState.UiRootStructPtr);
+
+        nint[] anchors = [uiRoot, trueRoot, uiRootStruct];
+        foreach (var anchor in anchors)
+        {
+            if (anchor == 0) continue;
+            var mapParent = Ptr(anchor + Poe2.ImportantUi.MapParentPtr);
+            if (mapParent == 0) continue;
+            var lg = Ptr(mapParent + Poe2.MapParent.LargeMapPtr);
+            var mn = Ptr(mapParent + Poe2.MapParent.MiniMapPtr);
+            if (lg == 0 || mn == 0 || lg == mn) continue;
+            largeEl = lg;
+            miniEl = mn;
+            return true;
+        }
+        return false;
+    }
+
+    private bool TryBuildMapViewport(nint el, float uiScale, int windowWidth, int windowHeight, out MapViewport vp)
+    {
+        vp = default;
+        if (!TryReadMapElement(el, out var localVis, out var hierVis, out var sx, out var sy, out var zoom)) return false;
+        var rect = ReadElementScreenRect(el, uiScale, windowWidth, windowHeight);
+        vp = new MapViewport(hierVis, sx, sy, zoom, rect.left, rect.top, rect.right, rect.bottom);
+        return zoom > 0.05f;
+    }
+
+    private readonly record struct ScreenRect(float left, float top, float right, float bottom)
+    {
+        public bool HasArea => MapViewportLogic.HasArea(left, top, right, bottom);
+    }
+
+    /// <summary>
+    /// While the corner minimap is shown, the fullscreen MapUiElement is locally visible and carries
+    /// the live pan/zoom; the 0×0 corner MapUiElement does not.
+    /// </summary>
+    private bool TryReadActiveMapProjection(nint miniEl, nint largeEl, out float shiftX, out float shiftY, out float zoom)
+    {
+        if (largeEl != 0
+            && TryReadMapElement(largeEl, out var largeLocal, out _, out shiftX, out shiftY, out zoom)
+            && largeLocal)
+            return true;
+        return TryReadMapElement(miniEl, out _, out _, out shiftX, out shiftY, out zoom);
+    }
+
+    /// <summary>
+    /// The visible minimap border is a square UiElement sibling under the corner MapUiElement's parent
+    /// (Research --map-scan-frames: parent.children → 402×402 @ top-right).
+    /// </summary>
+    private bool TryReadMinimapFrameRect(
+        nint miniMapEl, float uiScale, int windowWidth, int windowHeight,
+        out nint frameEl, out float left, out float top, out float right, out float bottom)
+    {
+        frameEl = 0;
+        left = top = right = bottom = 0;
+        var parent = Ptr(miniMapEl + Poe2.UiElement.Parent);
+        if (parent == 0) return false;
+
+        var first = Ptr(parent + Poe2.UiElement.Children);
+        if (first == 0 || !_reader.TryReadStruct<nint>(parent + Poe2.UiElement.Children + 8, out var lastC))
+            return false;
+        var n = ((long)lastC - (long)first) / 8;
+        if (n is <= 0 or > 256) return false;
+
+        var candidates = new List<MapViewportLogic.MinimapFrameCandidate>((int)n);
+        var children = new List<nint>((int)n);
+        for (long k = 0; k < n; k++)
+        {
+            var child = Ptr(first + (nint)(k * 8));
+            if (child == 0 || child == miniMapEl) continue;
+            children.Add(child);
+            _reader.TryReadStruct<float>(child + Poe2.UiElement.SizeW, out var w);
+            _reader.TryReadStruct<float>(child + Poe2.UiElement.SizeH, out var h);
+            var rect = ReadElementScreenRect(child, uiScale, windowWidth, windowHeight);
+            candidates.Add(new MapViewportLogic.MinimapFrameCandidate(
+                w, h, rect.left, rect.top, rect.right, rect.bottom,
+                HierarchicallyVisible(child) || IsVisible(child)));
+        }
+
+        var bestIdx = -1;
+        var bestArea = 0f;
+        for (var i = 0; i < candidates.Count; i++)
+        {
+            var c = candidates[i];
+            if (c.Width <= 0f || c.Height <= 0f) continue;
+            var aspect = c.Width / c.Height;
+            if (aspect is < 0.85f or > 1.15f) continue;
+            if (!c.Visible) continue;
+            if (!MapViewportLogic.IsTopRightMinimapRect(c.Left, c.Top, c.Right, c.Bottom, windowWidth, windowHeight)) continue;
+            var area = (c.Right - c.Left) * (c.Bottom - c.Top);
+            if (bestIdx >= 0 && area <= bestArea) continue;
+            bestIdx = i;
+            bestArea = area;
+            left = c.Left;
+            top = c.Top;
+            right = c.Right;
+            bottom = c.Bottom;
+        }
+
+        if (bestIdx < 0) return false;
+        frameEl = children[bestIdx];
+        return true;
+    }
+
+    /// <summary>Walk the UiElement parent chain summing RelativePos and apply Size × UI scale for clip bounds.</summary>
+    private ScreenRect ReadElementScreenRect(nint el, float uiScale, int windowWidth, int windowHeight)
+    {
+        float x = 0f, y = 0f;
+        var cur = el;
+        for (var depth = 0; depth < 24 && cur != 0; depth++)
+        {
+            if (_reader.TryReadStruct<float>(cur + Poe2.UiElement.RelativePos, out var rx))
+                x += rx;
+            if (_reader.TryReadStruct<float>(cur + Poe2.UiElement.RelativePos + 4, out var ry))
+                y += ry;
+            if (!_reader.TryReadStruct<nint>(cur + Poe2.UiElement.Parent, out var par) || par == 0 || par == cur) break;
+            cur = par;
+        }
+
+        _reader.TryReadStruct<float>(el + Poe2.UiElement.SizeW, out var w);
+        _reader.TryReadStruct<float>(el + Poe2.UiElement.SizeH, out var h);
+        var (left, top, right, bottom) = MapViewportLogic.ClampScreenRect(x, y, w, h, uiScale, windowWidth, windowHeight);
+        return new ScreenRect(left, top, right, bottom);
     }
 
     private void DiscoverMapElements(nint inGameState)
     {
         var uiRoot = Ptr(inGameState + Poe2.InGameState.UiRoot);
         if (uiRoot == 0) return;
-        var queue = new Queue<nint>(); queue.Enqueue(uiRoot);
+        var trueRoot = Ptr(uiRoot + Poe2.UiElement.Parent);
+        var root = trueRoot != 0 && trueRoot != uiRoot ? trueRoot : uiRoot;
+        var queue = new Queue<nint>(); queue.Enqueue(root);
         var visited = new HashSet<nint>();
         var body = new byte[Poe2.MapUiElement.Zoom + 8];
         while (queue.Count > 0 && visited.Count < 30000)
@@ -978,14 +1217,18 @@ public sealed class Poe2Live
         }
     }
 
-    private bool TryReadMapElement(nint el, out bool visible, out float shiftX, out float shiftY, out float zoom)
+    private bool TryReadMapElement(
+        nint el, out bool localVisible, out bool hierarchicallyVisible,
+        out float shiftX, out float shiftY, out float zoom)
     {
-        visible = false; shiftX = shiftY = zoom = 0;
+        localVisible = hierarchicallyVisible = false;
+        shiftX = shiftY = zoom = 0;
         if (!_reader.TryReadStruct<float>(el + Poe2.MapUiElement.DefaultShift + 4, out var dsy) || dsy != -20f) return false;
         _reader.TryReadStruct<float>(el + Poe2.MapUiElement.Shift, out shiftX);
         _reader.TryReadStruct<float>(el + Poe2.MapUiElement.Shift + 4, out shiftY);
         _reader.TryReadStruct<float>(el + Poe2.MapUiElement.Zoom, out zoom);
-        visible = IsVisible(el);
+        localVisible = IsVisible(el);
+        hierarchicallyVisible = HierarchicallyVisible(el);
         return true;
     }
 
@@ -1283,20 +1526,46 @@ public sealed class Poe2Live
         return 0;
     }
 
+    /// <summary>True iff the element and every ancestor has the local visible bit set.</summary>
+    public bool HierarchicallyVisible(nint element)
+    {
+        var cur = element;
+        for (var guard = 0; guard < 16 && cur != 0; guard++)
+        {
+            if (!IsVisible(cur)) return false;
+            var par = Ptr(cur + Poe2.UiElement.Parent);
+            if (par == 0 || par == cur) break;
+            cur = par;
+        }
+        return true;
+    }
+
     // ── internals ───────────────────────────────────────────────────────────
 
-    /// <summary>RENDER-RATE live read of one already-known monster's world position + HP, reusing the
-    /// component addresses cached by the last <see cref="Entities"/> walk (no component re-resolve, no map
-    /// re-enumeration). This is what lets HP bars track a moving monster smoothly at the full frame rate
-    /// while the expensive entity enumeration stays at world rate. Two tiny reads (12-byte position, 8-byte
-    /// vital). Returns false if the entity isn't in the current area's cache or the position read fails.</summary>
+    /// <summary>RENDER-RATE live read of one monster's world position + HP. Reuses component addresses
+    /// cached by the last <see cref="Entities"/> walk when available; resolves on cache miss so the render
+    /// thread can use a different <see cref="Poe2Live"/> instance than the world reader.</summary>
     public bool TryLiveBar(nint entity, out Vector3 world, out int hpCur, out int hpMax)
     {
         world = default; hpCur = 0; hpMax = 0;
-        if (!_renderAddr.TryGetValue(entity, out var render) || render == 0) return false;
+        if (!_renderAddr.TryGetValue(entity, out var render))
+        {
+            render = ResolveComponent(entity, "Render");
+            _renderAddr[entity] = render;
+        }
+        if (render == 0) return false;
         if (!_reader.TryReadStruct<Vector3>(render + Poe2.Render.CurrentWorldPosition, out world)) return false;
-        if (_lifeAddr.TryGetValue(entity, out var life) && life != 0
-            && _reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v)) { hpCur = v.Current; hpMax = v.Max; }
+        if (!_lifeAddr.TryGetValue(entity, out var life))
+        {
+            life = ResolveComponent(entity, "Life");
+            _lifeAddr[entity] = life;
+        }
+        if (life != 0)
+        {
+            EnsureVitalOffsets(life);
+            if (_reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v))
+            { hpCur = v.Current; hpMax = v.Max; }
+        }
         return true;
     }
 
@@ -1321,6 +1590,17 @@ public sealed class Poe2Live
         world = default; hpCur = 0; hpMax = 0;
         if (render == 0 || !_reader.TryReadStruct<Vector3>(render + Poe2.Render.CurrentWorldPosition, out world)) return false;
         if (life != 0 && _reader.TryReadStruct<VitalStruct>(life + _healthOff, out var v)) { hpCur = v.Current; hpMax = v.Max; }
+        return true;
+    }
+
+    /// <summary>RENDER-RATE live grid position for a known entity (nav-target tail, etc.). Resolves Render
+    /// on cache miss — safe on the render thread for a handful of ids per frame.</summary>
+    public bool TryLiveGrid(nint entity, out System.Numerics.Vector2 grid)
+    {
+        grid = default;
+        var world = EntityWorld(entity);
+        if (world is not { } w) return false;
+        grid = new System.Numerics.Vector2(w.X / Poe2.WorldToGridRatio, w.Y / Poe2.WorldToGridRatio);
         return true;
     }
 
