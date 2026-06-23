@@ -275,22 +275,24 @@ public sealed class OverlayWindow : IDisposable
         }
     }
 
-    /// <summary>Track the PoE window's screen rect; resize backing bitmap if dimensions changed.</summary>
+    /// <summary>Track the PoE client area (UI coords match GetClientRect, not the window frame).</summary>
     public bool TrackGameWindow(nint gameHwnd)
     {
         if (gameHwnd == 0) return false;
-        if (!OverlayNative.GetWindowRect(gameHwnd, out var rect)) return false;
+        if (!OverlayNative.GetClientRect(gameHwnd, out var client)) return false;
 
-        var w = rect.Right  - rect.Left;
-        var h = rect.Bottom - rect.Top;
+        var w = client.Right - client.Left;
+        var h = client.Bottom - client.Top;
         if (w <= 0 || h <= 0) return false;
 
-        if (rect.Left != OriginX || rect.Top != OriginY || w != Width || h != Height)
+        var origin = new OverlayNative.POINT { X = 0, Y = 0 };
+        if (!OverlayNative.ClientToScreen(gameHwnd, ref origin)) return false;
+
+        if (origin.X != OriginX || origin.Y != OriginY || w != Width || h != Height)
         {
             if (w != Width || h != Height) AllocateBackingBitmap(w, h);
-            OriginX = rect.Left;
-            OriginY = rect.Top;
-            // Position is communicated to the OS via UpdateLayeredWindow's pptDst.
+            OriginX = origin.X;
+            OriginY = origin.Y;
         }
 
         return true;

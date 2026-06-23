@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using POE2Radar.Core.Cheats;
 
 namespace POE2Radar.Overlay.Config;
 
@@ -12,7 +13,12 @@ public sealed class RadarSettings
 {
     // ── Feature flags (reserved for later phases; no behavior wired yet). ──
     public bool HideJunk { get; set; } = false;
+    // Legacy single flag — migrated once to the three layer-specific toggles below; not persisted after migrate.
     public bool ShowPath { get; set; } = false;
+    public bool PathTogglesMigrated { get; set; }
+    public bool ShowPathWorld { get; set; } = true;
+    public bool ShowPathMap { get; set; } = true;
+    public bool ShowPathMinimap { get; set; } = true;
     public bool UseCuratedLandmarks { get; set; } = true;
     public bool DrawAllLandmarkPaths { get; set; } = false;
 
@@ -203,6 +209,10 @@ public sealed class RadarSettings
     //    offered/wanted ratios + depth. Mirrors the GroundItems/Monoliths settings pattern. ──
     public CurrencyExchangeSettings CurrencyExchange { get; set; } = new();
 
+    // ── Optional byte patches (AOB-scanned instruction patches). All off by default; toggled from the
+    //    dashboard Settings tab. Original bytes are restored on exit. ──
+    public GamePatchSettings Patches { get; set; } = new();
+
     private static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -224,7 +234,7 @@ public sealed class RadarSettings
         {
             if (!File.Exists(FilePath))
             {
-                var fresh = new RadarSettings();
+                var fresh = new RadarSettings { PathTogglesMigrated = true };
                 fresh.Save();
                 return fresh;
             }
@@ -302,6 +312,14 @@ public sealed class RadarSettings
         if (AutoNavPatterns is not null)
             for (var i = 0; i < AutoNavPatterns.Count; i++)
                 if (IsStaleExp(AutoNavPatterns[i])) { AutoNavPatterns[i] = precise; changed = true; }
+
+        // One-time: fold the legacy single ShowPath flag into per-layer toggles.
+        if (!PathTogglesMigrated)
+        {
+            ShowPathWorld = ShowPathMap = ShowPathMinimap = ShowPath;
+            PathTogglesMigrated = true;
+            changed = true;
+        }
 
         return changed;
     }

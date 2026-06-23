@@ -537,11 +537,15 @@ internal static class DashboardHtml
               <label class="sw"><input type="checkbox" data-set="alwaysShowOverlay"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Hide junk entities<small>suppress cosmetic / FX / daemon dots</small></div>
               <label class="sw"><input type="checkbox" data-set="hideJunk"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Navigation paths<small>draw A&#42; routes to selected landmarks</small></div>
-              <label class="sw"><input type="checkbox" data-set="showPath"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Path on ground<small>world-projected route when the large map is closed</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPathWorld"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Path on large map<small>route overlay when Tab map is open</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPathMap"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Path on minimap<small>route inside the corner minimap</small></div>
+              <label class="sw"><input type="checkbox" data-set="showPathMinimap"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl">Curated landmark names<small>community labels (boss / reward / exits)</small></div>
               <label class="sw"><input type="checkbox" data-set="useCuratedLandmarks"><span class="track"></span><span class="knob"></span></label></div>
-            <div class="row"><div class="rl">Overlay FPS cap<small>lower = less load on the game; 60 is smooth for a radar (15&ndash;360)</small></div>
+            <div class="row"><div class="rl">Overlay FPS cap<small>match your monitor (72/144); world reads stay ~30&nbsp;Hz (15&ndash;360)</small></div>
               <input class="numin" type="number" step="1" min="15" max="360" data-set="fpsCap"></div>
           </div>
           <div class="card">
@@ -769,6 +773,25 @@ async function loadSettings(){
     ce = s.currencyExchange || {};
     renderHpBars(); renderTerrain(); renderGround(); renderHover(); renderMono(); renderExchange();
   }catch(e){}
+}
+
+/* ── game byte patches (nested object: POST the whole {patches}) ── */
+let patches = null;
+function renderPatches(){
+  if(!patches) return;
+  $$('[data-patch]').forEach(el=>{
+    const k=el.dataset.patch;
+    if(el.type==='checkbox') el.checked=!!patches[k];
+    else if(patches[k]!==undefined && patches[k]!==null) el.value=patches[k];
+  });
+}
+function savePatches(){ if(patches) saveSetting('patches', patches); }
+function wirePatches(){
+  $$('[data-patch]').forEach(el=>{
+    const k=el.dataset.patch;
+    if(el.type==='checkbox') el.onchange=()=>{ patches=patches||{}; patches[k]=el.checked; savePatches(); };
+    else el.onchange=()=>{ const v=parseFloat(el.value); if(!isNaN(v)){ patches=patches||{}; patches[k]=v; savePatches(); } };
+  });
 }
 
 /* ── ground-item pricing (nested object: POST the whole {groundItems}) ── */
