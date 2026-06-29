@@ -532,8 +532,26 @@ public sealed class OverlayRenderer : IDisposable
     private void DrawMonolithPanel(ID2D1RenderTarget rt, RenderContext ctx)
     {
         if (!ctx.ShowMonolithPanel || ctx.Monoliths is not { Count: > 0 } monos) return;
-        var list = monos.OrderByDescending(m => m.BestEx).Take(6).ToList();
         const float w = 248f, pad = 6f, lineH = 15f, headH = 17f, titleH = 18f;
+        float x = ctx.WindowWidth - w - 10f, y = 90f;
+
+        // Title bar doubles as a click target ("> "/"v " caret like the nav menu) — clicking it toggles
+        // the collapsed state (persisted by RadarApp). Registered after DrawNavMenu's rect clear, so it
+        // survives and is hit-tested for both clicks and the click-through gate.
+        var collapsed = ctx.MonolithPanelCollapsed;
+        var caret = collapsed ? "> " : "v ";
+
+        if (collapsed)
+        {
+            // Collapsed: just the clickable header bar, keeping the count visible for quick reference.
+            float ch = pad * 2f + titleH;
+            rt.FillRectangle(new Vortice.RawRectF(x, y, x + w, y + ch), _bPanel!);
+            rt.DrawText($"{caret}Monoliths ({monos.Count})", _tf!, new Rect(x + pad, y + pad, x + w - pad, y + pad + titleH), _bText!, DrawTextOptions.Clip);
+            _legendRowRects.Add((new Vortice.RawRectF(x, y, x + w, y + ch), "mono-collapse"));
+            return;
+        }
+
+        var list = monos.OrderByDescending(m => m.BestEx).Take(6).ToList();
 
         float h = pad * 2f + titleH;
         foreach (var m in list)
@@ -541,11 +559,11 @@ public sealed class OverlayRenderer : IDisposable
             var rows = 0; foreach (var r in m.Rewards) if (r.Ex > 0 && rows < 3) rows++;
             h += headH + lineH * rows;
         }
-        float x = ctx.WindowWidth - w - 10f, y = 90f;
         rt.FillRectangle(new Vortice.RawRectF(x, y, x + w, y + h), _bPanel!);
 
         float cy = y + pad;
-        rt.DrawText($"Monoliths ({monos.Count})", _tf!, new Rect(x + pad, cy, x + w - pad, cy + titleH), _bText!, DrawTextOptions.Clip);
+        rt.DrawText($"{caret}Monoliths ({monos.Count})", _tf!, new Rect(x + pad, cy, x + w - pad, cy + titleH), _bText!, DrawTextOptions.Clip);
+        _legendRowRects.Add((new Vortice.RawRectF(x, cy, x + w, cy + titleH), "mono-collapse"));
         cy += titleH;
         foreach (var m in list)
         {

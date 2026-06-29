@@ -1053,7 +1053,8 @@ public sealed class RadarApp : IDisposable
             LootTags: _lootTagFrame.Count > 0 ? _lootTagFrame : null,
             // Runeshape monoliths: value-coloured map markers + nearby reward panel (world-space).
             Monoliths: monoliths,
-            ShowMonolithPanel: _settings.Monoliths.ShowPanel);
+            ShowMonolithPanel: _settings.Monoliths.ShowPanel,
+            MonolithPanelCollapsed: _settings.Monoliths.PanelCollapsed);
         // The overlay is only visible while PoE2 is foreground (Render draws nothing otherwise). Skip
         // the whole draw + UpdateLayeredWindow blit when unfocused — but render once on the focus-loss
         // transition so the last visible frame is cleared rather than left frozen on screen.
@@ -1248,7 +1249,8 @@ public sealed class RadarApp : IDisposable
     /// <summary>
     /// WM_LBUTTONDOWN handler (wired to <see cref="OverlayWindow.OnClientClick"/>): dispatch the
     /// click on the navigation-menu widget. "menu-toggle" flips the dropdown; "corner:X" pins the
-    /// widget to that screen corner (persisted); "target:&lt;id&gt;" toggles that nav target's selection.
+    /// widget to that screen corner (persisted); "target:&lt;id&gt;" toggles that nav target's selection;
+    /// "mono-collapse" collapses/expands the nearby-monolith reward panel (persisted).
     /// Client coords arrive directly from the window, in the same space as LegendRowRects. Purely
     /// local UI — nothing is ever sent to the game.
     /// </summary>
@@ -1269,6 +1271,11 @@ public sealed class RadarApp : IDisposable
         else if (action.StartsWith("target:", StringComparison.Ordinal))
         {
             TogglePathTarget(action.Substring("target:".Length));
+        }
+        else if (action == "mono-collapse")
+        {
+            _settings.Monoliths.PanelCollapsed = !_settings.Monoliths.PanelCollapsed;
+            _settings.Save();   // persist so the panel stays as the user left it across restarts
         }
     }
 

@@ -189,4 +189,6 @@ public sealed record RenderContext(
     // Runeshape monoliths to mark on the map (value-coloured icon + N badge + value/reward label) and
     // list in the nearby-monolith panel. World-space (grid). Null/empty → none.
     IReadOnlyList<MonolithMarker>? Monoliths = null,
-    bool ShowMonolithPanel = true);
+    bool ShowMonolithPanel = true,
+    // When true the monolith panel is shrunk to just its clickable title bar (toggled by clicking the header).
+    bool MonolithPanelCollapsed = false);
