@@ -627,6 +627,18 @@ internal static class DashboardHtml
               <input class="numin" type="number" step="100" min="0" data-set="manaCooldownMs"></div>
             <div class="row"><div class="rl hint-row">F8 toggles auto-flask in-game. Status: <span id="flaskState">&mdash;</span></div></div>
           </div>
+          <div class="card">
+            <h3>Game Patches <span class="tag">&middot; memory writes</span></h3>
+            <div class="row"><div class="rl hint-row">AOB-scanned byte patches (ported from GameHelper2). All off by default; original bytes restore on exit. <b>Use at your own risk</b> &mdash; may violate PoE2 ToS.</div></div>
+            <div class="row"><div class="rl">No atlas fog<small>removes fog of war on the atlas</small></div>
+              <label class="sw"><input type="checkbox" data-patch="noAtlasFog"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Infinite zoom<small>removes the zoom-out clamp</small></div>
+              <label class="sw"><input type="checkbox" data-patch="infiniteZoom"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Player light<small>increases light radius</small></div>
+              <label class="sw"><input type="checkbox" data-patch="playerLightRadius"><span class="track"></span><span class="knob"></span></label></div>
+            <div class="row"><div class="rl">Light radius<small>100&ndash;50000 (default 2000)</small></div>
+              <input class="numin" type="number" step="100" min="100" max="50000" data-patch="playerLightRadiusValue"></div>
+          </div>
         </div>
         <div style="margin-top:18px; height:14px"><span class="saved" id="savedMsg">&#10003; saved to config</span></div>
       </section>
@@ -767,11 +779,12 @@ async function loadSettings(){
     });
     hpBars = s.hpBars || null;
     terrain = s.terrain || null;
+    patches = s.patches || {};
     gi = s.groundItems || {};
     hover = s.hoverPrice || {};
     mono = s.monoliths || {};
     ce = s.currencyExchange || {};
-    renderHpBars(); renderTerrain(); renderGround(); renderHover(); renderMono(); renderExchange();
+    renderHpBars(); renderTerrain(); renderGround(); renderHover(); renderMono(); renderExchange(); renderPatches();
   }catch(e){}
 }
 
@@ -1601,7 +1614,7 @@ async function checkVersion(){
   }catch(e){}
 }
 
-wireSettings(); wireHpBars(); wireTerrain(); wireGround(); wireHover(); wireMono(); wireExchange();
+wireSettings(); wireHpBars(); wireTerrain(); wireGround(); wireHover(); wireMono(); wireExchange(); wirePatches();
 loadIcons().then(()=>{ loadSettings(); loadFilters(); }); // Rules is the default tab
 tick(); setInterval(tick, 1000);
 checkVersion();
