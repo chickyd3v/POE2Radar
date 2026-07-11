@@ -198,12 +198,13 @@ public sealed class RadarApp : IDisposable
         IReadOnlyList<ItemLabelSpec> ItemLabels,
         IReadOnlyList<SelectedPath> SelectedPaths,
         IReadOnlyList<LegendEntry> Legend,
-        IReadOnlyList<string> SelectedSnapshot)
+        IReadOnlyList<string> SelectedSnapshot,
+        bool HasRareInPresence)
     {
         public static readonly WorldSnapshot Empty = new(
             false, 0, 0, "", 0, Array.Empty<Poe2Live.EntityDot>(), Array.Empty<Poe2Live.Landmark>(), null,
             Array.Empty<HpBarSpec>(), Array.Empty<ItemLabelSpec>(), Array.Empty<SelectedPath>(),
-            Array.Empty<LegendEntry>(), Array.Empty<string>());
+            Array.Empty<LegendEntry>(), Array.Empty<string>(), false);
     }
     private volatile WorldSnapshot _world = WorldSnapshot.Empty;
     private NumVec2 _worldPlayer;          // the world tick's current player grid (for off-thread replans)
@@ -1118,7 +1119,7 @@ public sealed class RadarApp : IDisposable
             // pointer changes (i.e. once per session), not every render frame.
             if (localPlayer != _charNameFor) { _charNameFor = localPlayer; _charName = _liveRender.PlayerName(localPlayer); }
             _cameraMatrix = _liveRender.CameraMatrix(inGameState);
-            TickAutoFlask(localPlayer);
+            TickAutoFlask(localPlayer, snap);
 
             if (snap.AreaHash != _hpSmoothAreaHash)
             {
@@ -1373,6 +1374,20 @@ public sealed class RadarApp : IDisposable
         _charLevel = _live.PlayerLevel(localPlayer);   // changes ~never; 30 Hz is plenty
         _terrain ??= _live.Terrain(areaInstance);
         _entities = _live.Entities(areaInstance);
+
+        var hasRareInPresence = false;
+        if (_settings.BloodOfTheWarriorFlask
+            && _live.PresenceAoeScale(localPlayer) is { } scale)
+        {
+            var radius = BotwFlaskLogic.PresenceGridRadius(scale);
+            foreach (var e in _entities)
+            {
+                if (!BotwFlaskLogic.IsHostileRareInRange(e, player, radius)) continue;
+                hasRareInPresence = true;
+                break;
+            }
+        }
+
         // Drop the local player's own entity — it lives in the AwakeEntities map like any
         // other Player, but the dedicated center blip already represents "you" (gated by
         // ShowPlayerBlip). Without this, a Player-category dot renders at map-center even with
@@ -1384,6 +1399,7 @@ public sealed class RadarApp : IDisposable
         var culling = _hidden.Count > 0;
         if (localPlayer != 0 || culling)
             _entities.RemoveAll(e => e.Address == localPlayer || (culling && _hidden.IsHidden(e.Metadata)));
+
         // Accumulate any newly-seen monster mod ids into the persistent catalog (debounced write)
         // so the dashboard rule editor can offer them and they survive restarts / new content.
         _modCatalog.Observe(_entities);
@@ -1490,7 +1506,8 @@ public sealed class RadarApp : IDisposable
 
         // Publish the whole immutable world snapshot atomically for the render thread.
         _world = new WorldSnapshot(true, areaHash, areaLevel, areaCode, _charLevel,
-            _entities, _landmarks, _terrain, hpSpecs, itemLabels, _selectedPaths, _legend, _selectedSnapshot);
+            _entities, _landmarks, _terrain, hpSpecs, itemLabels, _selectedPaths, _legend, _selectedSnapshot,
+            hasRareInPresence);
     }
 
     /// <summary>
@@ -1727,12 +1744,12 @@ public sealed class RadarApp : IDisposable
     /// The life flask's trigger pool is selectable (LifeFlaskMode): Health%, Energy Shield%, or
     /// Either — ES is ignored on builds with no ES pool, so "Either" is safe for a pure-life build.
     /// </summary>
-    private void TickAutoFlask(nint localPlayer)
+    private void TickAutoFlask(nint localPlayer, WorldSnapshot snap)
     {
         // No plausible vitals read (Life component missing, or vital offsets drifted past the auto-
         // relocation's reach): DON'T fire — firing on unknown HP would either spam or never trigger.
         // Surface it so a post-patch break is visible instead of silently "armed but never fires".
-        if (_live.PlayerVitals(localPlayer) is not { } v)
+        if (_liveRender.PlayerVitals(localPlayer) is not { } v)
         {
             _flaskNote = "paused (vitals unreadable — offsets may have drifted)";
             return;
@@ -1754,10 +1771,26 @@ public sealed class RadarApp : IDisposable
             _              => (hpLow, $"life@{v.HpPct:F0}%"), // "Health" (default)
         };
 
-        var now = DateTime.UtcNow;
-        if (lifeTrigger && now - _lifeFiredAt >= TimeSpan.FromMilliseconds(_settings.LifeCooldownMs))
+        var areaOk = snap.InGame && snap.AreaHash == _areaHash;
+        string? botwReason = null;
+        // Hideout/town: rage often stays ≥15 while the flask buff never applies → would spam forever.
+        if (_settings.BloodOfTheWarriorFlask
+            && areaOk
+            && BotwFlaskLogic.IsCombatArea(snap.AreaCode)
+            && _liveRender.TryBotwFlaskBuffTimeLeft(localPlayer, out var buffLeft)
+            && _liveRender.PlayerRage(localPlayer) is { } rage
+            && _liveRender.PresenceAoeScale(localPlayer) is not null)
         {
-            SendInputNative.Tap((ushort)_settings.LifeKey); _lifeFiredAt = now; _flaskNote = lifeReason;
+            var rare = snap.HasRareInPresence;
+            if (BotwFlaskLogic.ShouldFire(true, buffLeft, rare, rage))
+                botwReason = BotwFlaskLogic.FireReason(rare, rage);
+        }
+
+        var fireLife = lifeTrigger || botwReason is not null;
+        var now = DateTime.UtcNow;
+        if (fireLife && now - _lifeFiredAt >= TimeSpan.FromMilliseconds(_settings.LifeCooldownMs))
+        {
+            SendInputNative.Tap((ushort)_settings.LifeKey); _lifeFiredAt = now; _flaskNote = botwReason ?? lifeReason;
         }
         if (v.ManaPct < _settings.ManaThresholdPct &&
             now - _manaFiredAt >= TimeSpan.FromMilliseconds(_settings.ManaCooldownMs))

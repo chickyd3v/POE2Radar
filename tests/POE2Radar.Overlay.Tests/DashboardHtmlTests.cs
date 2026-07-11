@@ -26,4 +26,11 @@ public sealed class DashboardHtmlTests
         Assert.DoesNotContain("data-patch=\"revealMap\"", DashboardHtml.Page);
         Assert.DoesNotContain("data-patch=\"enemyHealthBars\"", DashboardHtml.Page);
     }
+
+    [Fact]
+    public void SettingsTab_HasBloodOfTheWarriorFlaskToggle()
+    {
+        Assert.Contains("data-set=\"bloodOfTheWarriorFlask\"", DashboardHtml.Page);
+        Assert.Contains("Blood of the Warrior", DashboardHtml.Page);
+    }
 }

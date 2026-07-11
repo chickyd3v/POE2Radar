@@ -625,6 +625,8 @@ internal static class DashboardHtml
               <input class="numin" type="number" step="100" min="0" data-set="lifeCooldownMs"></div>
             <div class="row"><div class="rl">Mana cooldown<small>min ms between mana taps</small></div>
               <input class="numin" type="number" step="100" min="0" data-set="manaCooldownMs"></div>
+            <div class="row"><div class="rl">Blood of the Warrior<small>re-apply life flask when buff &lt;1s if a Rare is in Presence or rage ≥ 15</small></div>
+              <label class="sw"><input type="checkbox" data-set="bloodOfTheWarriorFlask"><span class="track"></span><span class="knob"></span></label></div>
             <div class="row"><div class="rl hint-row">F8 toggles auto-flask in-game. Status: <span id="flaskState">&mdash;</span></div></div>
           </div>
           <div class="card">
