@@ -338,7 +338,13 @@ public static class Poe2
         // Stats: StatsChangedByItemsPtr @ +0x160 → StatsStructInternal; its Stats vec @ +0xF8 (GH2).
         public const int ItemLocalStatsVec = 0x20;  // ⚠ (one observation)
         public const int StatsChangedByItemsPtr = 0x160; // (GH2) → StatsStructInternal
+        // ✓ live 2026-07-10 (poe2-offsets statsBaseResistsPtrOff): another StatsStructInternal with
+        // dynamic combat stats. Current rage lives HERE, not on the items vec.
+        public const int StatsBaseResistsPtr = 0x1C8;
         public const int StatsStructStatsVec     = 0xF8;  // (GH2) StdVector<StatArrayStruct>
+        // ✓ live 2026-07-10: key 0x2B9B on base-resists vec matched UI rage (59). Old 0x2B99 on
+        // items vec was absent. Absent key ⇒ 0.
+        public const int RageStatKey = 0x2B9B;
     }
 
     /// <summary>Chest component. ✓ OpenState @ +0x168 — the offset is stable, but the 2026-06-06 patch
@@ -403,6 +409,26 @@ public static class Poe2
         // 1.0 from a ~0.92 base (≈ √1.2 radius scaling), and it tracked the buff on→off→on with
         // nothing else moving. Effective presence radius = base radius × this scalar.
         public const int PresenceAoeScale = 0x2A0;
+    }
+
+    /// <summary>Buffs component — status-effect pointer StdVector. ✓ live DevTree 2026-07-10.</summary>
+    public static class BuffsComponent
+    {
+        public const int StatusEffectsVec = 0x160; // StdVector of StatusEffect pointers
+    }
+
+    /// <summary>One StatusEffect entry pointed to by Buffs.StatusEffectsVec. ✓ live DevTree 2026-07-10.</summary>
+    public static class StatusEffect
+    {
+        public const int BuffDefPtr = 0x08;  // → BuffDefinition
+        public const int TotalTime  = 0x18;  // float
+        public const int TimeLeft   = 0x1C;  // float
+    }
+
+    /// <summary>BuffDefinition — internal buff id is a raw UTF-16 C-string pointer at +0x00. ✓ live.</summary>
+    public static class BuffDefinition
+    {
+        public const int NamePtr = 0x00;
     }
 
     /// <summary>

@@ -331,6 +331,74 @@ public sealed class Poe2Live
         return new Vitals(hp.Current, Unreserved(hp), mana.Current, Unreserved(mana), es.Current, Unreserved(es));
     }
 
+    /// <summary>Positioned.PresenceAoeScale (+0x2A0). Returns null if Positioned missing / unreadable.</summary>
+    public float? PresenceAoeScale(nint localPlayer)
+    {
+        var pos = ResolveComponent(localPlayer, "Positioned");
+        if (pos == 0) return null;
+        if (!_reader.TryReadStruct<float>(pos + Poe2.Positioned.PresenceAoeScale, out var s)) return null;
+        return float.IsFinite(s) && s > 0f ? s : null;
+    }
+
+    /// <summary>
+    /// Current rage from Stats base-resists vec (key <see cref="Poe2.StatsComponent.RageStatKey"/>).
+    /// Missing key ⇒ 0. Null only if Stats / vector unreadable.
+    /// </summary>
+    public int? PlayerRage(nint localPlayer)
+    {
+        var stats = ResolveComponent(localPlayer, "Stats");
+        if (stats == 0) return null;
+        // Live 2026-07-10: rage is on StatsBaseResistsPtr (+0x1C8), not the items vec (+0x160).
+        var internal_ = Ptr(stats + Poe2.StatsComponent.StatsBaseResistsPtr);
+        if (internal_ == 0) return null;
+        if (!_reader.TryReadStruct<StdVector>(internal_ + Poe2.StatsComponent.StatsStructStatsVec, out var vec))
+            return null;
+        var n = ((long)vec.Last - (long)vec.First) / Poe2.StatsComponent.StatArrayStride;
+        if (n is <= 0 or > 4000) return 0;
+        for (long i = 0; i < n; i++)
+        {
+            var e = vec.First + (nint)(i * Poe2.StatsComponent.StatArrayStride);
+            if (!_reader.TryReadStruct<int>(e, out var key)) continue;
+            if (key != Poe2.StatsComponent.RageStatKey) continue;
+            return _reader.TryReadStruct<int>(e + 4, out var val) ? val : 0;
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// Try to read BotW flask buff remaining time.
+    /// Returns false if Buffs component/vector unreadable.
+    /// On success: timeLeft is null if buff absent, else remaining seconds (+∞ if non-finite).
+    /// </summary>
+    public bool TryBotwFlaskBuffTimeLeft(nint localPlayer, out float? timeLeft)
+    {
+        timeLeft = null;
+        var buffs = ResolveComponent(localPlayer, "Buffs");
+        if (buffs == 0) return false;
+        if (!_reader.TryReadStruct<StdVector>(buffs + Poe2.BuffsComponent.StatusEffectsVec, out var vec))
+            return false;
+        var n = ((long)vec.Last - (long)vec.First) / 8;
+        if (n < 0 || n > 128) return false;
+        // n == 0 → success, buff absent (timeLeft stays null)
+        float? best = null;
+        for (long i = 0; i < n; i++)
+        {
+            var se = Ptr(vec.First + (nint)(i * 8));
+            if (se == 0) continue;
+            var bdef = Ptr(se + Poe2.StatusEffect.BuffDefPtr);
+            if (bdef == 0) continue;
+            var namePtr = Ptr(bdef + Poe2.BuffDefinition.NamePtr);
+            if (namePtr == 0) continue;
+            var name = _reader.ReadStringUtf16(namePtr, 64);
+            if (!BotwFlaskLogic.IsBotwFlaskBuff(name)) continue;
+            if (!_reader.TryReadStruct<float>(se + Poe2.StatusEffect.TimeLeft, out var left)) continue;
+            var t = float.IsFinite(left) ? left : float.PositiveInfinity;
+            if (best is null || t > best) best = t;
+        }
+        timeLeft = best;
+        return true;
+    }
+
     private static int Unreserved(VitalStruct v)
     {
         var reserved = (int)Math.Ceiling(v.ReservedFraction / 10000f * v.Max) + v.ReservedFlat;

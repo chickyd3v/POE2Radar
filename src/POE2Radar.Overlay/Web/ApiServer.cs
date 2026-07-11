@@ -513,6 +513,7 @@ public sealed class ApiServer : IDisposable
         manaCooldownMs = _settings.ManaCooldownMs,
         lifeKey = _settings.LifeKey,
         manaKey = _settings.ManaKey,
+        bloodOfTheWarriorFlask = _settings.BloodOfTheWarriorFlask,
         apiPort = _settings.ApiPort, // display only — changing it needs a restart
         styles = _settings.Styles,   // per-item icon shapes/colors/sizes + mechanic overrides
         hpBars = _settings.HpBars,   // monster HP-bar geometry (width/height/offset)
@@ -577,6 +578,7 @@ public sealed class ApiServer : IDisposable
                 case "manaCooldownMs" when TryInt(p.Value, out var n): _settings.ManaCooldownMs = Math.Clamp(n, 0, 60000); applied.Add(p.Name); break;
                 case "lifeKey" when TryInt(p.Value, out var n): _settings.LifeKey = Math.Clamp(n, 1, 255); applied.Add(p.Name); break;
                 case "manaKey" when TryInt(p.Value, out var n): _settings.ManaKey = Math.Clamp(n, 1, 255); applied.Add(p.Name); break;
+                case "bloodOfTheWarriorFlask" when TryBool(p.Value, out var b): _settings.BloodOfTheWarriorFlask = b; applied.Add(p.Name); break;
                 // Atlas declutter + content-icon + route-chevron options (#3/#4/#5).
                 case "atlasHideCompleted" when TryBool(p.Value, out var b): _settings.AtlasHideCompleted = b; applied.Add(p.Name); break;
                 case "atlasHideAccessible" when TryBool(p.Value, out var b): _settings.AtlasHideAccessible = b; applied.Add(p.Name); break;

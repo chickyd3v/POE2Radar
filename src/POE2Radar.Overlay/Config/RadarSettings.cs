@@ -182,6 +182,9 @@ public sealed class RadarSettings
     public int LifeKey { get; set; } = 0x31;
     public int ManaKey { get; set; } = 0x32;
 
+    /// <summary>When true, also tap the life flask to keep Blood of the Warrior up (buff &lt;1s + rare-in-presence or rage≥15).</summary>
+    public bool BloodOfTheWarriorFlask { get; set; } = false;
+
     // ── HTTP API. ──
     public int ApiPort { get; set; } = 7777;
 
