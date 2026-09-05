@@ -782,6 +782,7 @@ async function loadSettings(){
     hpBars = s.hpBars || null;
     terrain = s.terrain || null;
     patches = s.patches || {};
+    patchStatus = s.patchStatus || {};
     gi = s.groundItems || {};
     hover = s.hoverPrice || {};
     mono = s.monoliths || {};
@@ -792,11 +793,21 @@ async function loadSettings(){
 
 /* ── game byte patches (nested object: POST the whole {patches}) ── */
 let patches = null;
+let patchStatus = {};
+function patchInfo(k){
+  if(!patchStatus) return null;
+  return patchStatus[k] || patchStatus[k.charAt(0).toUpperCase()+k.slice(1)] || null;
+}
 function renderPatches(){
   if(!patches) return;
   $$('[data-patch]').forEach(el=>{
     const k=el.dataset.patch;
-    if(el.type==='checkbox') el.checked=!!patches[k];
+    const info=patchInfo(k);
+    if(el.type==='checkbox'){
+      el.disabled=!!(info && info.found===false);
+      el.title=el.disabled?'pattern not found this patch':'';
+      el.checked=info && info.found ? !!info.active : !!patches[k];
+    }
     else if(patches[k]!==undefined && patches[k]!==null) el.value=patches[k];
   });
 }

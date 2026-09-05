@@ -46,12 +46,33 @@ public sealed class CheatManager : ICheatPatchTarget
                     ResolveConstantAddress(state, sectionBase, bytes, matches[0]);
 
                 Console.WriteLine($"  patch [{def.ShortName}] found at 0x{state.Address:X}");
+                if (def.Type == CheatType.NopInstruction)
+                    DetectAlreadyPatched(state);
                 break;
             }
 
             if (!state.Found)
                 Console.WriteLine($"  patch [{def.ShortName}] pattern not found");
         }
+    }
+
+    private void DetectAlreadyPatched(CheatState state)
+    {
+        var def = state.Definition;
+        var live = ReadBytes(state.Address, def.PatchBytes.Length);
+        if (live == null || !live.AsSpan().SequenceEqual(def.PatchBytes)) return;
+
+        var needle = def.OriginalsFilePattern ?? def.Pattern;
+        state.OriginalBytes = CheatModuleOriginals.TryExtractUniqueFromFile(
+            _process.ModulePath, needle, def.TargetOffset, def.PatchBytes.Length);
+        if (state.OriginalBytes == null)
+        {
+            Console.WriteLine($"  patch [{def.ShortName}] already NOPed; original bytes not in module file");
+            return;
+        }
+
+        state.Active = true;
+        Console.WriteLine($"  patch [{def.ShortName}] leftover NOP recovered from exe — treating as active");
     }
 
     private void ResolveConstantAddress(CheatState state, nint sectionBase, byte[] sectionBytes, int matchOffset)

@@ -1,0 +1,58 @@
+using POE2Radar.Core.Cheats;
+using POE2Radar.Core.Game;
+using Xunit;
+
+namespace POE2Radar.Core.Tests;
+
+public sealed class CheatModuleOriginalsTests
+{
+    [Fact]
+    public void InfiniteZoom_Pattern_MatchesVanillaAndLeftoverNop_AtCameraZoomStore()
+    {
+        var zoom = CheatDefinition.All().Single(d => d.Name == "InfiniteZoom");
+        byte[] vanilla =
+        [
+            0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, 0xAC, 0xB7, 0x49, 0x03,
+            0xF3, 0x0F, 0x11, 0x8E, 0x28, 0x05, 0x00, 0x00,
+        ];
+        byte[] leftover =
+        [
+            0xF3, 0x0F, 0x5F, 0xC8, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+            0xF3, 0x0F, 0x11, 0x8E, 0x28, 0x05, 0x00, 0x00,
+        ];
+
+        Assert.Equal(new byte[] { 0x28, 0x05, 0x00, 0x00 }, zoom.Pattern[^4..].Select(b => b!.Value).ToArray());
+        Assert.Single(AobScanner.FindPattern(vanilla, zoom.Pattern));
+        Assert.Single(AobScanner.FindPattern(leftover, zoom.Pattern));
+    }
+
+    [Fact]
+    public void TryExtractUnique_ReturnsSlice_WhenExactlyOneHit()
+    {
+        byte[] image =
+        [
+            0xCC, 0xCC,
+            0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, 0xAC, 0xB7, 0x49, 0x03,
+            0xF3, 0x0F, 0x11, 0x8E, 0x28, 0x05, 0x00, 0x00,
+            0xCC,
+        ];
+        byte?[] needle =
+        [
+            0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null,
+            0xF3, 0x0F, 0x11, 0x8E, 0x28, 0x05, 0x00, 0x00,
+        ];
+
+        var got = CheatModuleOriginals.TryExtractUnique(image, needle, offset: 4, count: 8);
+
+        Assert.Equal(new byte[] { 0xF3, 0x0F, 0x5D, 0x0D, 0xAC, 0xB7, 0x49, 0x03 }, got);
+    }
+
+    [Fact]
+    public void TryExtractUnique_ReturnsNull_WhenHitCountIsNotOne()
+    {
+        byte[] none = [0xCC, 0xCC, 0xCC];
+        byte?[] needle = [0xF3, 0x0F, 0x5F, 0xC8];
+
+        Assert.Null(CheatModuleOriginals.TryExtractUnique(none, needle, 0, 4));
+    }
+}

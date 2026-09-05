@@ -18,7 +18,8 @@ public sealed record CheatDefinition(
     int RipDispOffset = 0,
     float ConstantDefault = 0f,
     float ConstantMin = 0f,
-    float ConstantMax = 100f)
+    float ConstantMax = 100f,
+    byte?[]? OriginalsFilePattern = null)
 {
     public static IReadOnlyList<CheatDefinition> All() =>
     [
@@ -28,11 +29,14 @@ public sealed record CheatDefinition(
             PatchBytes: [0x90, 0x90, 0x90, 0x90, 0x90],
             CheatType.NopInstruction),
 
+        // Camera zoom clamp: maxss xmm1,xmm0; minss xmm1,[rip]; movss [rsi+0x528],xmm1 (Camera.Zoom).
+        // Middle 8 bytes are wildcards so a leftover NOP patch still matches.
         new("InfiniteZoom", "Zoom",
-            [0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null, 0xF3, 0x0F, 0x11, 0x8E],
+            [0xF3, 0x0F, 0x5F, 0xC8, null, null, null, null, null, null, null, null, 0xF3, 0x0F, 0x11, 0x8E, 0x28, 0x05, 0x00, 0x00],
             TargetOffset: 4,
             PatchBytes: [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90],
-            CheatType.NopInstruction),
+            CheatType.NopInstruction,
+            OriginalsFilePattern: [0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null, 0xF3, 0x0F, 0x11, 0x8E, 0x28, 0x05, 0x00, 0x00]),
 
         new("PlayerLightRadius", "Light",
             [0xF3, 0x44, 0x0F, 0x58, 0xC6, 0xF3, 0x44, 0x0F, 0x59, 0x3D],

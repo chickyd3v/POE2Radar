@@ -23,6 +23,7 @@ public sealed class DashboardHtmlTests
         Assert.Contains("data-patch=\"infiniteZoom\"", DashboardHtml.Page);
         Assert.Contains("data-patch=\"playerLightRadius\"", DashboardHtml.Page);
         Assert.Contains("data-patch=\"playerLightRadiusValue\"", DashboardHtml.Page);
+        Assert.Contains("pattern not found this patch", DashboardHtml.Page);
         Assert.DoesNotContain("data-patch=\"revealMap\"", DashboardHtml.Page);
         Assert.DoesNotContain("data-patch=\"enemyHealthBars\"", DashboardHtml.Page);
     }

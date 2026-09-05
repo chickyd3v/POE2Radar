@@ -9177,6 +9177,68 @@ static int RunScanPatches(ProcessHandle process, MemoryReader reader)
     }
     if (jlHits == 0) Console.WriteLine("  (none)");
     else if (jlHits > 8) Console.WriteLine($"  … +{jlHits - 8} more");
+
+    Console.WriteLine();
+    Console.WriteLine("=== Zoom clamp hunt (maxss xmm1,xmm0 = F3 0F 5F C8) ===");
+    var zoomPats = new (string Label, byte?[] Pattern)[]
+    {
+        ("maxss+minss[rip]+movss[rsi]", [0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null, 0xF3, 0x0F, 0x11, 0x8E]),
+        ("maxss+minss[rip]+movss[rdi]", [0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null, 0xF3, 0x0F, 0x11, 0x8F]),
+        ("maxss+minss[rip]+movss[rcx]", [0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null, 0xF3, 0x0F, 0x11, 0x89]),
+        ("maxss then 8 NOPs + movss[rsi]", [0xF3, 0x0F, 0x5F, 0xC8, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xF3, 0x0F, 0x11, 0x8E]),
+        ("maxss then NOPs (leftover patch)", [0xF3, 0x0F, 0x5F, 0xC8, 0x90, 0x90, 0x90, 0x90]),
+        ("maxss+minss[rip] any tail", [0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D]),
+        ("maxss+minss xmm1,xmm0", [0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0xC8]),
+        ("maxss+minss[rip] xmm0", [0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x05]),
+        ("minss[rip]+movss [rsi]", [0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null, 0xF3, 0x0F, 0x11, 0x8E]),
+        ("minss[rip]+movss [rdi]", [0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null, 0xF3, 0x0F, 0x11, 0x8F]),
+        ("8 NOPs + movss[rsi]", [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xF3, 0x0F, 0x11, 0x8E]),
+        ("8 NOPs + movss[rdi]", [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xF3, 0x0F, 0x11, 0x8F]),
+        ("maxss then 8 NOPs + movss[rdi]", [0xF3, 0x0F, 0x5F, 0xC8, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xF3, 0x0F, 0x11, 0x8F]),
+        ("maxss xmm1,xmm0 count", [0xF3, 0x0F, 0x5F, 0xC8]),
+    };
+    foreach (var (label, pat) in zoomPats)
+    {
+        var n = 0;
+        foreach (var (sectionBase, bytes) in sections)
+        {
+            foreach (var off in AobScanner.FindPattern(bytes, pat.AsSpan()))
+            {
+                n++;
+                if (n <= 6 && !label.Contains("count"))
+                {
+                    Console.WriteLine($"  {label}  #{n} @0x{sectionBase + off:X}");
+                    DumpBytesAround(reader, sectionBase + off - 4, label.Contains("NOP") ? 56 : 32);
+                }
+            }
+        }
+        Console.WriteLine($"  {label}: {n} hit(s)");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("=== Zoom clamp original bytes from module file ===");
+    Console.WriteLine($"  path={process.ModulePath}");
+    try
+    {
+        var file = File.ReadAllBytes(process.ModulePath);
+        byte?[] vanilla =
+        [
+            0xF3, 0x0F, 0x5F, 0xC8, 0xF3, 0x0F, 0x5D, 0x0D, null, null, null, null,
+            0xF3, 0x0F, 0x11, 0x8E, 0x28, 0x05, 0x00, 0x00,
+        ];
+        var fileHits = AobScanner.FindPattern(file, vanilla.AsSpan());
+        Console.WriteLine($"  vanilla in file: {fileHits.Count} hit(s)");
+        foreach (var off in fileHits.Take(4))
+        {
+            var slice = file.AsSpan(off, 20);
+            Console.WriteLine($"    file+0x{off:X}: {BitConverter.ToString(slice.ToArray()).Replace('-', ' ')}");
+            Console.WriteLine($"    minss 8 bytes: {BitConverter.ToString(file, off + 4, 8).Replace('-', ' ')}");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"  file read failed: {ex.Message}");
+    }
     return 0;
 
     static string RegName(byte modrm) => modrm switch
