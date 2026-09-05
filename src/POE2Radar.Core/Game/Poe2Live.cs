@@ -172,8 +172,8 @@ public sealed class Poe2Live
 
     private string _league = ""; private nint _leagueFor = -1;
 
-    /// <summary>Current league name as the game stores it (ServerData @ AreaInstance+0x580 → std::wstring
-    /// +0x21E0). Matches poe.ninja/poe2scout's league Value verbatim, including the "HC " prefix — so it
+    /// <summary>Current league name as the game stores it (ServerData → std::wstring
+    /// + League offset). Matches poe.ninja/poe2scout's league Value verbatim, including the "HC " prefix — so it
     /// disambiguates the two IsCurrent leagues (softcore vs hardcore) for price auto-detect. Cached per area.</summary>
     public string LeagueName(nint areaInstance)
     {

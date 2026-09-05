@@ -245,6 +245,8 @@ public sealed class Poe2Atlas
         if (string.IsNullOrEmpty(code)) return "";
         var s = code;
         if (s.StartsWith("Map", StringComparison.Ordinal)) s = s[3..];
+        if (s.StartsWith("AtlasLeague", StringComparison.Ordinal)) s = s["AtlasLeague".Length..];
+        else if (s.StartsWith("Atlas", StringComparison.Ordinal)) s = s["Atlas".Length..];
         s = s.Replace("UberBoss_", "").Replace("PrecursorTower", "Tower ").Replace("Unique", "");
         // Drop a leading "MerchantNN_" style numeric qualifier inside merchant codes.
         s = System.Text.RegularExpressions.Regex.Replace(s, @"(?<=\D)\d{1,2}(?=_|$)", "");
@@ -285,7 +287,7 @@ public sealed class Poe2Atlas
         public (int X, int Y) Grid => (GridX, GridY);
         public bool Unlocked => (Flags & 0x01) != 0;
         public bool Visited => (Flags & 0x02) != 0;
-        public bool HasContent => Content != 0;   // +0x310 (atlas-row ptr) non-null ⇒ has rolled content
+        public bool HasContent => Content != 0;   // ContentVec length (rolled content / pins), not the old +0x310 ptr
         // Accessible/Completed are decoded from the deeper node-data status byte (the GameHelper-validated
         // source — *(node+0x10)+0x20 +0x2CF, bit0 accessible / bit1 completed). Accessible ("you can run
         // this now") is the route SOURCE frontier; the element-flag Unlocked/Visited bits are kept separate.
@@ -394,7 +396,10 @@ public sealed class Poe2Atlas
             if (el == 0 || Ptr(el) != _nodeVtable) continue;     // vtable == node class
             matched++;
             _reader.TryReadStruct<uint>(el + Poe2.AtlasNode.MapNodeId, out var id);
-            _reader.TryReadStruct<uint>(el + Poe2.AtlasNode.Content, out var content);
+            var content = 0u;
+            var cvBegin = Ptr(el + Poe2.AtlasNode.ContentVec);
+            if (cvBegin != 0 && _reader.TryReadStruct<nint>(el + Poe2.AtlasNode.ContentVec + 8, out var cvEnd) && cvEnd > cvBegin)
+                content = (uint)Math.Min(((long)cvEnd - (long)cvBegin) / 4, 255);
             _reader.TryReadStruct<byte>(el + Poe2.AtlasNode.State, out var state);
             _reader.TryReadStruct<byte>(el + Poe2.AtlasNode.Biome, out var biome);
             _reader.TryReadStruct<byte>(el + Poe2.AtlasNode.Flags, out var flags);
@@ -403,19 +408,14 @@ public sealed class Poe2Atlas
             _reader.TryReadStruct<float>(el + Poe2.UiElement.RelativePos + 4, out var y);
             _reader.TryReadStruct<float>(el + Poe2.UiElement.SizeW, out var w);
             _reader.TryReadStruct<float>(el + Poe2.UiElement.SizeH, out var h);
-            _reader.TryReadStruct<float>(el + 0x130, out var scale);
+            _reader.TryReadStruct<float>(el + Poe2.UiElement.LocalScaleMul, out var scale);
             _reader.TryReadStruct<int>(el + Poe2.AtlasNode.GridPos, out var gridX);     // StdTuple2D<int> atlas grid coord
             _reader.TryReadStruct<int>(el + Poe2.AtlasNode.GridPos + 4, out var gridY); // → the routing graph key
             _reader.TryReadStruct<uint>(el + Poe2.UiElement.Flags, out var uiFlags);
             var visible = ((uiFlags >> Poe2.UiElement.FlagVisibleBit) & 1) != 0;
             // The node's content/icon TYPE lives on a nested sigil-icon child (content int 1..~50);
             // walk first-children a few levels to find it. Lets us classify + match nodes to in-game icons.
-            var iconType = 0; var d = el;
-            for (var lvl = 0; lvl < 5 && d != 0; lvl++)
-            {
-                if (_reader.TryReadStruct<uint>(d + Poe2.AtlasNode.Content, out var c) && c is > 0 and < 256) { iconType = (int)c; break; }
-                d = Ptr(Ptr(d + Poe2.UiElement.Children)); // first child = *(*(el+Children))
-            }
+            var iconType = 0;
             // Accessible/completed status: the GameHelper-validated deeper model
             // *(node+DataStorage)+DataModel → status byte +0x2CF (bit0 accessible, bit1 completed). This is
             // the route SOURCE frontier ("maps you can run right now"). Cheap (2 derefs + 1 byte).
@@ -567,7 +567,7 @@ public sealed class Poe2Atlas
     // live 2026-06-20 via the F10 discovery dump: n00[0]+0x300='[DeadlyMapBoss|Deadly Map Boss]'). This badge
     // list carries the boss TIER ("Deadly Map Boss") that the +0x310 headline row collapses to the generic
     // "Powerful Map Boss" — so it's what makes Deadly/Twinned/etc. trackable + navigable.
-    private const int BadgeContentStr = 0x300;
+    private const int BadgeContentStr = 0x2E8; // ✓ live 2026-09-05: child+0x2E8 → "Powerful Map Boss". Was 0x300.
 
     /// <summary>Read + parse a node's content-badge display names (no lock — caller holds <see cref="_nodeLock"/>,
     /// e.g. ResolveTags via ReadCanvasNodes). Returns the display portion of each "[Code|Display]" badge.</summary>
@@ -733,37 +733,53 @@ public sealed class Poe2Atlas
         // Prettify mismatched the in-game name for some maps, which broke web-UI filters. Validated live
         // 2026-06-16 (Research --atlas-mapname). Prettify(code) stays only as a fallback. The raw code is
         // returned too (stable, never localized) so the F10 inspector / dashboard can show it.
-        string code = "", name = "";
-        var mapRow = Ptr(el + 0x300);
-        if (mapRow != 0)
+        string code = "";
+        string atlasName = "";
+        // Rolled MAP (MapRupture → "Rupture"): node-data +0x290, not the +0x300 atlas-node type row
+        // (that row is White Node / District B / AtlasRedGate). Filter table uses this name.
+        var rolled = ReadRolledMapCode(el);
+        if (rolled.StartsWith("Map", StringComparison.Ordinal))
+            code = rolled;
+        var mapRow = Ptr(el + Poe2.AtlasNode.MapNodeId);
+        if (string.IsNullOrEmpty(code) && mapRow != 0)
         {
             var w = Ptr(mapRow);
             var direct = w != 0 ? _reader.ReadStringUtf16(w, 64) : "";
-            if (direct.StartsWith("Map", StringComparison.Ordinal))
-            {
-                code = direct;                                  // legacy layout: +0x300 row → code string directly
-            }
+            if (direct.StartsWith("Map", StringComparison.Ordinal) || direct.StartsWith("Atlas", StringComparison.Ordinal))
+                code = direct;
             else if (w != 0)
             {
-                var idP = Ptr(w);                               // WorldAreas +0x00 → Id "MapXxx"
+                var idP = Ptr(w);
                 code = idP != 0 ? _reader.ReadStringUtf16(idP, 64) : "";
-                var nmP = Ptr(w + Poe2.AtlasMapRow.WorldAreaName); // WorldAreas +0x08 → localized name
-                name = nmP != 0 ? _reader.ReadStringUtf16(nmP, 64) : "";
+            }
+            if (w != 0)
+            {
+                var nmP = Ptr(w + Poe2.AtlasMapRow.WorldAreaName);
+                atlasName = nmP != 0 ? _reader.ReadStringUtf16(nmP, 64) : "";
             }
         }
-        // Offline classification layer (atlas_maps.json): type/group/tags keyed by the internal MapId. Adds
-        // unique/lineage/arbiter signal Classify() can't derive, and a curated display name as a fallback.
+        else if (mapRow != 0)
+        {
+            var w = Ptr(mapRow);
+            if (w != 0)
+            {
+                var nmP = Ptr(w + Poe2.AtlasMapRow.WorldAreaName);
+                atlasName = nmP != 0 ? _reader.ReadStringUtf16(nmP, 64) : "";
+            }
+        }
+
         var meta = AtlasMapData.Shared.Get(code) ?? default;
 
-        var map = (LooksLikeName(name) && name.Length <= 48) ? name.Trim()
-                : (!string.IsNullOrEmpty(meta.Name) ? meta.Name
-                : (code.StartsWith("Map", StringComparison.Ordinal) ? Prettify(code) : ""));
+        var map = !string.IsNullOrEmpty(meta.Name) ? meta.Name
+                : (code.StartsWith("Map", StringComparison.Ordinal) ? Prettify(code)
+                : ((LooksLikeName(atlasName) && atlasName.Length <= 48) ? StripDnt(atlasName.Trim())
+                : ((code.StartsWith("Atlas", StringComparison.Ordinal) ? Prettify(code) : ""))));
 
         var tags = new List<string>(4);
 
-        // Rolled content lives on the EndgameMapAtlas row at +0x310 (null ⇒ no headline/mechanic content,
-        // but the node may still carry CONTENT BADGES — read below regardless).
-        var row = Ptr(el + 0x310);
+        // Rolled content lives on the same EndgameMaps row as the name (+0x300), not the old +0x310 slot
+        // (that slot is GridPos as of 2026-09-05). Headline: row+0x38 → content row +0x30 name.
+        var row = mapRow;
         if (row != 0)
         {
             // Headline content: row+0x38 → content row; +0x30 is a pointer to the (NUL-terminated UTF-16)
@@ -818,7 +834,40 @@ public sealed class Poe2Atlas
         return sb.ToString();
     }
 
-    private static bool LooksLikeName(string s) => s.Length is >= 3 and <= 64 && s[0] is >= ' ' and < (char)0x7f;
+    /// <summary>Rolled WorldArea map id on the node-data struct (DataMapId). Empty when the tile is
+    /// only an atlas-node type (gate/lock/path) with no assigned map.</summary>
+    private string ReadRolledMapCode(nint el)
+    {
+        var storage = Ptr(el + Poe2.AtlasNode.DataStorage);
+        var data = storage == 0 ? 0 : Ptr(storage + Poe2.AtlasNode.DataModel);
+        if (data == 0) return "";
+        var wrap = Ptr(data + Poe2.AtlasNode.DataMapId);
+        if (wrap == 0) return "";
+        nint inner = Ptr(wrap);
+        nint inner2 = inner == 0 ? 0 : Ptr(inner);
+        foreach (var a in new[] { wrap, inner, inner2 })
+        {
+            if (a == 0) continue;
+            var s = _reader.ReadStringUtf16(a, 64);
+            if (s.StartsWith("Map", StringComparison.Ordinal) && s.Length is >= 4 and <= 64) return s;
+        }
+        return "";
+    }
+
+    private static bool LooksLikeName(string s)
+    {
+        if (s.Length is < 3 or > 64 || s[0] is < ' ' or >= (char)0x7f) return false;
+        if (s.Contains(".dds", StringComparison.OrdinalIgnoreCase)) return false;
+        if (s.StartsWith("Art/", StringComparison.Ordinal) || s.StartsWith("Data/", StringComparison.Ordinal)) return false;
+        if (s.StartsWith("Metadata/", StringComparison.Ordinal)) return false;
+        return true;
+    }
+
+    private static string StripDnt(string s)
+    {
+        if (s.StartsWith("[DNT]", StringComparison.OrdinalIgnoreCase)) s = s[5..].Trim();
+        return s;
+    }
 
     /// <summary>Title-case each space-separated word ("breach" → "Breach", "boss unique" → "Boss Unique").</summary>
     private static string TitleCase(string s)

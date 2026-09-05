@@ -384,10 +384,14 @@ if (HasFlag(args, "--atlas-readnodes"))
     var n2 = atlas.ReadNodes(igs2);      // cached fast path
     Console.WriteLine($"ReadNodes: {nodes.Count} nodes (first {t1}ms, cached {sw.ElapsedMilliseconds - t1}ms). " +
         $"visible={n2.Count(n => n.Visible)} hasContent={n2.Count(n => n.HasContent)} unvisited={n2.Count(n => !n.Visited)} unlocked={n2.Count(n => n.Unlocked)}");
+    for (var i = 0; i < 20; i++) n2 = atlas.ReadNodes(igs2); // fill tag cache
+    Console.WriteLine("maps: " + string.Join("; ", n2.Where(n => !string.IsNullOrEmpty(n.MapName)).GroupBy(n => n.MapName).OrderByDescending(g => g.Count()).Take(12).Select(g => $"{g.Key}×{g.Count()}")));
+    Console.WriteLine("tags: " + string.Join("; ", n2.SelectMany(n => n.Tags).GroupBy(t => t).OrderByDescending(g => g.Count()).Take(12).Select(g => $"{g.Key}×{g.Count()}")));
+    Console.WriteLine($"accessible={n2.Count(n => n.Accessible)} completed={n2.Count(n => n.Completed)} currentGrid={atlas.CurrentNodeGrid()}");
     Console.WriteLine("biome histogram: " + string.Join(" ", n2.GroupBy(n => n.Biome).OrderBy(g => g.Key).Select(g => $"{g.Key}:{g.Count()}")));
     Console.WriteLine("sample (visible, hasContent or unvisited):");
     foreach (var n in n2.Where(n => n.Visible && (n.HasContent || !n.Visited)).Take(16))
-        Console.WriteLine($"  id={n.Id,-9} biome={n.Biome,-2} content={n.Content,-6} flags=0x{n.Flags:X2}(unlk={(n.Unlocked ? 1 : 0)} vis={(n.Visited ? 1 : 0)}) compl={n.Completion} pos=({n.X:F0},{n.Y:F0}) size=({n.W:F0}x{n.H:F0}) scale={n.Scale:G4}");
+        Console.WriteLine($"  id={n.Id,-9} biome={n.Biome,-2} content={n.Content,-6} flags=0x{n.Flags:X2}(unlk={(n.Unlocked ? 1 : 0)} vis={(n.Visited ? 1 : 0)}) compl={n.Completion} pos=({n.X:F0},{n.Y:F0}) size=({n.W:F0}x{n.H:F0}) scale={n.Scale:G4} grid=({n.GridX},{n.GridY}) map=\"{n.MapName}\" kind={n.Kind} tags=[{string.Join(',', n.Tags)}] acc={n.Accessible}");
     return 0;
 }
 
@@ -1188,8 +1192,8 @@ static int RunEntityProbe(MemoryReader reader, nint entity)
     const float WorldToGridRatio = 250f / 23f; // ≈ 10.8696 (GameHelper2 TileStructure)
 
     Console.WriteLine($"Entity @ 0x{entity:X16}");
-    if (!reader.TryReadStruct<uint>(entity + 0x80, out var id) ||
-        !reader.TryReadStruct<byte>(entity + 0x84, out var isValid))
+    if (!reader.TryReadStruct<uint>(entity + Poe2.Entity.Id, out var id) ||
+        !reader.TryReadStruct<byte>(entity + Poe2.Entity.IsValid, out var isValid))
     {
         Console.Error.WriteLine("  could not read Entity.Id / IsValid");
         return 1;
@@ -1234,7 +1238,7 @@ static int RunEntityProbe(MemoryReader reader, nint entity)
         Console.WriteLine($"  → Grid       : ({world.X / WorldToGridRatio:F1}, {world.Y / WorldToGridRatio:F1})");
     }
     if (byName.TryGetValue("Life", out var life) && life != 0 &&
-        reader.TryReadStruct<POE2Radar.Core.Game.VitalStruct>(life + 0x1A8, out var hp))
+        reader.TryReadStruct<POE2Radar.Core.Game.VitalStruct>(life + Poe2.Life.Health, out var hp))
     {
         Console.WriteLine($"  Life.Health  : {hp.Current} / {hp.Max}");
     }
@@ -1508,16 +1512,53 @@ static int RunCamera(ProcessHandle process, MemoryReader reader)
 // name/level, camera/zoom — and dump the camera object so the WorldToScreen matrix can be found.
 static int RunInfo(ProcessHandle process, MemoryReader reader)
 {
-    var (igs, _, ai, lp) = ResolveChain(process, reader);
+    var (gs, igs, ai, lp) = ResolveChain(process, reader);
     if (ai == 0) { Console.Error.WriteLine("Could not resolve chain (in game?)."); return 1; }
-    Console.WriteLine($"InGameState 0x{igs:X}  AreaInstance 0x{ai:X}  LocalPlayer 0x{lp:X}");
+    Console.WriteLine($"GameState 0x{gs:X}  InGameState 0x{igs:X}  AreaInstance 0x{ai:X}  LocalPlayer 0x{lp:X}");
 
-    // Area name: AreaInstance+0xA0 -> AreaInfo -> +0x00 -> UTF-16 "Code\0Name\0".
-    var areaInfo = SafePtr(reader, ai + 0xA0);
-    var strPtr = SafePtr(reader, areaInfo);
-    var code = reader.ReadStringUtf16(strPtr, 64);
-    var name = code.Length > 0 ? reader.ReadStringUtf16(strPtr + (nint)((code.Length + 1) * 2), 64) : "";
-    Console.WriteLine($"AreaInfo 0x{areaInfo:X}  Code='{code}'  Name='{name}'");
+    // AreaInfo: double-deref UTF-16 "Code\0Name\0". Scan a window — this pointer hops on patch.
+    Console.WriteLine("AreaInstance pointer→string scan (look for an area code like G1_town):");
+    for (var o = 0x80; o <= 0x140; o += 8)
+    {
+        var info = SafePtr(reader, ai + o);
+        if (info == 0) continue;
+        var s = SafePtr(reader, info);
+        if (s == 0) s = info;
+        var c = reader.ReadStringUtf16(s, 64);
+        if (c.Length < 3 || c.Length > 48) continue;
+        if (!c.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-')) continue;
+        var nm = reader.ReadStringUtf16(s + (nint)((c.Length + 1) * 2), 64);
+        Console.WriteLine($"  +0x{o:X3} -> 0x{info:X}  Code='{c}'  Name='{nm}'");
+    }
+    Console.WriteLine("AreaInstance StdWString scan:");
+    for (var o = 0x80; o <= 0x180; o += 8)
+    {
+        var w = ReadStdWString(reader, ai + o);
+        if (w.Length < 3 || w.Length > 64) continue;
+        if (!w.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '-' or ' ')) continue;
+        Console.WriteLine($"  +0x{o:X3} std='{w}'");
+    }
+
+    var wd = SafePtr(reader, igs + 0x368);
+    Console.WriteLine($"WorldData candidate InGameState+0x368 = 0x{wd:X}");
+    if (wd != 0)
+    {
+        var row = SafePtr(reader, wd + 0x98);
+        Console.WriteLine($"  WorldData+0x98 = 0x{row:X}");
+        if (row != 0)
+        {
+            var inner = SafePtr(reader, row + 0x98);
+            Console.WriteLine($"    +0x98 → 0x{inner:X}  std='{ReadStdWString(reader, inner)}' utf16='{reader.ReadStringUtf16(inner, 64)}'");
+            var idp = SafePtr(reader, inner);
+            Console.WriteLine($"    inner+0x00 → 0x{idp:X} utf16='{reader.ReadStringUtf16(idp, 64)}' std='{ReadStdWString(reader, inner)}'");
+            var nmp = SafePtr(reader, inner + 8);
+            Console.WriteLine($"    inner+0x08 → 0x{nmp:X} utf16='{reader.ReadStringUtf16(nmp, 64)}'");
+        }
+    }
+    reader.TryReadStruct<int>(ai + 0xC4, out var lvlC4);
+    reader.TryReadStruct<uint>(ai + 0x114, out var hash114);
+    reader.TryReadStruct<uint>(ai + 0x11C, out var hash11C);
+    Console.WriteLine($"  int@+0xC4={lvlC4}  uint@+0x114=0x{hash114:X8}  uint@+0x11C=0x{hash11C:X8}");
 
     // Character: try the Player component, then a 'Character' component if present.
     foreach (var compName in new[] { "Player", "Character", "PlayerClass" })
@@ -6771,41 +6812,120 @@ static int RunAtlasMapName(ProcessHandle process, MemoryReader reader, int maxDi
 {
     var (_, igs, _, _) = ResolveChain(process, reader);
     if (igs == 0) { Console.Error.WriteLine("no chain."); return 1; }
-    var uiRoot = SafePtr(reader, igs + 0x2F0);
-    var root = SafePtr(reader, uiRoot + 0xB8) is var tr && tr != 0 ? tr : uiRoot;
+    var (vt, canvas, nodes) = FindAtlasNodeClass(reader, igs);
+    if (vt == 0 || nodes.Count < 50) { Console.Error.WriteLine($"FAIL: node class not found ({nodes.Count}). Open the Atlas MAP."); return 1; }
+    Console.WriteLine($"node class 0x{vt:X}  canvas 0x{canvas:X}  ({nodes.Count} nodes)\n");
 
-    var queue = new Queue<nint>(); queue.Enqueue(root);
-    var visited = new HashSet<nint>();
     var seenCodes = new HashSet<string>(StringComparer.Ordinal);
     var shown = 0;
-    Console.WriteLine("Walking UI tree for atlas nodes (Atlas MAP must be open)…\n");
-    while (queue.Count > 0 && visited.Count < 200000 && shown < maxDistinct)
+    foreach (var el in nodes)
     {
-        var el = queue.Dequeue();
-        if (el == 0 || !visited.Add(el) || SafePtr(reader, el + 0x08) != el) continue;
-        var first = SafePtr(reader, el + 0x10);
-        if (first != 0 && reader.TryReadStruct<nint>(el + 0x18, out var last))
-        { var n = ((long)last - (long)first) / 8; if (n is > 0 and <= 16384) for (long k = 0; k < n; k++) queue.Enqueue(SafePtr(reader, first + (nint)(k * 8))); }
-
-        // Atlas node: el+0x300 → EndgameMaps row; row+0x00 → "MapXxx" code wstring (sometimes one ptr deeper).
+        if (shown >= maxDistinct) break;
         var row = SafePtr(reader, el + 0x300);
         if (row == 0) continue;
         var w = SafePtr(reader, row);
         var code = w != 0 ? reader.ReadStringUtf16(w, 64) : "";
-        if (!code.StartsWith("Map", StringComparison.Ordinal))
+        if (!code.StartsWith("Map", StringComparison.Ordinal) && !code.StartsWith("Atlas", StringComparison.Ordinal))
         {
             var w2 = SafePtr(reader, w);
             code = w2 != 0 ? reader.ReadStringUtf16(w2, 64) : code;
         }
-        if (!code.StartsWith("Map", StringComparison.Ordinal) || !seenCodes.Add(code)) continue;
+        if (string.IsNullOrEmpty(code) || !seenCodes.Add(code)) continue;
 
         shown++;
-        Console.WriteLine($"════════ code=\"{code}\"  Prettify=\"{Poe2Atlas.Prettify(code)}\"  row=0x{row:X}");
-        ScanRowForNames(reader, row, "    ");
+        Console.WriteLine($"════════ code=\"{code}\"  Prettify=\"{Poe2Atlas.Prettify(code)}\"  node=0x{el:X} row=0x{row:X}");
+        ScanRowForNames(reader, row, "    row ");
+        if (w != 0 && w != row) { Console.WriteLine("    WorldAreas-like *(row+0):"); ScanRowForNames(reader, w, "      wa "); }
+        var n0 = SafePtr(reader, SafePtr(reader, el + Poe2.UiElement.Children));
+        var n00 = n0 != 0 ? SafePtr(reader, SafePtr(reader, n0 + Poe2.UiElement.Children)) : 0;
+        var badgeHost = n00 != 0 ? n00 : n0;
+        if (badgeHost != 0)
+        {
+            Console.WriteLine($"    badge-host 0x{badgeHost:X} string fields 0x280..0x320:");
+            for (var off = 0x280; off <= 0x320; off += 8)
+            {
+                var p = SafePtr(reader, badgeHost + off);
+                var s = p != 0 ? reader.ReadStringUtf16(p, 80) : "";
+                if (Printable(s)) Console.WriteLine($"      host+0x{off:X3} -> \"{s}\"");
+                var begin = SafePtr(reader, badgeHost + Poe2.UiElement.Children);
+                if (begin != 0 && reader.TryReadStruct<nint>(badgeHost + Poe2.UiElement.ChildrenEnd, out var end))
+                {
+                    var n = ((long)end - (long)begin) / 8;
+                    for (long i = 0; i < n && i < 8; i++)
+                    {
+                        var ch = SafePtr(reader, begin + (nint)(i * 8));
+                        var cp = SafePtr(reader, ch + off);
+                        var cs = cp != 0 ? reader.ReadStringUtf16(cp, 80) : "";
+                        if (Printable(cs)) Console.WriteLine($"      child[{i}]+0x{off:X3} -> \"{cs}\"");
+                    }
+                }
+            }
+        }
         Console.WriteLine();
     }
     Console.WriteLine($"Dumped {shown} distinct maps. Identify the column whose UTF-16 string = the in-game");
     Console.WriteLine("display name; note its +offset (direct, or 'row->ptr+off') to wire into Poe2Atlas.");
+
+    Console.WriteLine("\n=== MapXxx hunt (rolled map id, not Atlas* node type) ===");
+    string? TryMap(nint a)
+    {
+        if (a == 0) return null;
+        var s = reader.ReadStringUtf16(a, 64);
+        if (s.StartsWith("Map", StringComparison.Ordinal) && s.Length is >= 4 and <= 48) return s;
+        var p = SafePtr(reader, a);
+        if (p == 0) return null;
+        s = reader.ReadStringUtf16(p, 64);
+        if (s.StartsWith("Map", StringComparison.Ordinal) && s.Length is >= 4 and <= 48) return s;
+        var p2 = SafePtr(reader, p);
+        if (p2 == 0) return null;
+        s = reader.ReadStringUtf16(p2, 64);
+        return s.StartsWith("Map", StringComparison.Ordinal) && s.Length is >= 4 and <= 48 ? s : null;
+    }
+    var found = new Dictionary<string, int>(StringComparer.Ordinal);
+    var samples = new List<string>();
+    foreach (var el in nodes.Take(400))
+    {
+        void Note(string where, string code)
+        {
+            found[code] = found.GetValueOrDefault(code) + 1;
+            if (samples.Count < 24) samples.Add($"{where} {code}");
+        }
+        var row = SafePtr(reader, el + 0x300);
+        if (row != 0)
+        {
+            for (var o = 0; o <= 0xC0; o += 8)
+            {
+                var m = TryMap(SafePtr(reader, row + o));
+                if (m != null) Note($"row+0x{o:X3}", m);
+            }
+            var w = SafePtr(reader, row);
+            if (w != 0)
+                for (var o = 0; o <= 0x80; o += 8)
+                {
+                    var m = TryMap(SafePtr(reader, w + o));
+                    if (m != null) Note($"wa+0x{o:X3}", m);
+                }
+        }
+        var kid = SafePtr(reader, SafePtr(reader, el + 0x10));
+        if (kid != 0)
+            for (var o = 0x280; o <= 0x360; o += 8)
+            {
+                var m = TryMap(SafePtr(reader, kid + o));
+                if (m != null) Note($"kid+0x{o:X3}", m);
+            }
+        var storage = SafePtr(reader, el + 0x10);
+        var data = storage != 0 ? SafePtr(reader, storage + 0x20) : 0;
+        if (data != 0)
+            for (var o = 0x250; o <= 0x2E0; o += 8)
+            {
+                var m = TryMap(SafePtr(reader, data + o));
+                if (m != null) Note($"data+0x{o:X3}", m);
+            }
+    }
+    Console.WriteLine($"distinct MapXxx: {found.Count}");
+    foreach (var kv in found.OrderByDescending(k => k.Value).Take(20))
+        Console.WriteLine($"  {kv.Value,4}× {kv.Key}");
+    foreach (var s in samples.Take(16)) Console.WriteLine($"  sample {s}");
     return 0;
 }
 
@@ -7085,7 +7205,7 @@ static int RunAtlasProbe(ProcessHandle process, MemoryReader reader)
         foreach (var el in list.Take(400))
         {
             if (reader.TryReadStruct<byte>(el + 0x32E, out var b) && b is >= 1 and <= 12) biomes.Add(b);
-            if (reader.TryReadStruct<float>(el + 0x288, out var sw) && reader.TryReadStruct<float>(el + 0x28C, out var sh)) szs.Add((sw, sh));
+            if (reader.TryReadStruct<float>(el + Poe2.UiElement.SizeW, out var sw) && reader.TryReadStruct<float>(el + Poe2.UiElement.SizeH, out var sh)) szs.Add((sw, sh));
         }
         var modal = szs.GroupBy(s => ((int)s.Item1, (int)s.Item2)).OrderByDescending(g => g.Count()).FirstOrDefault()?.Key ?? (0, 0);
         ranked.Add((vt, list.Count, biomes.Count, modal.Item1, modal.Item2));
@@ -7112,7 +7232,7 @@ static int RunAtlasProbe(ProcessHandle process, MemoryReader reader)
         var vcur = canvas.Key; var vguard = 0; var visible = true; var sbv = new System.Text.StringBuilder();
         while (vcur != 0 && vguard++ < 16)
         {
-            reader.TryReadStruct<uint>(vcur + 0x180, out var fl);
+            reader.TryReadStruct<uint>(vcur + Poe2.UiElement.Flags, out var fl);
             var bit = ((fl >> 0x0B) & 1) != 0;
             sbv.Append($"0x{vcur:X}[fl=0x{fl:X} vis={(bit ? 1 : 0)}] → ");
             if (!bit) { visible = false; }
@@ -7129,10 +7249,10 @@ static int RunAtlasProbe(ProcessHandle process, MemoryReader reader)
     var scales = new List<float>(); var sizes = new List<(float, float)>(); var ids = new HashSet<uint>(); var biomeHist = new Dictionary<int, int>();
     foreach (var el in sample)
     {
-        if (reader.TryReadStruct<float>(el + 0x118, out var rx) && reader.TryReadStruct<float>(el + 0x11C, out var ry) && float.IsFinite(rx) && float.IsFinite(ry))
+        if (reader.TryReadStruct<float>(el + Poe2.UiElement.RelativePos, out var rx) && reader.TryReadStruct<float>(el + Poe2.UiElement.RelativePos + 4, out var ry) && float.IsFinite(rx) && float.IsFinite(ry))
         { finiteRel++; relSet.Add(((int)rx, (int)ry)); }
-        if (reader.TryReadStruct<float>(el + 0x130, out var sc) && sc > 0.01f && sc < 4f) scales.Add(sc);
-        if (reader.TryReadStruct<float>(el + 0x288, out var sw) && reader.TryReadStruct<float>(el + 0x28C, out var sh)) sizes.Add((sw, sh));
+        if (reader.TryReadStruct<float>(el + Poe2.UiElement.LocalScaleMul, out var sc) && sc > 0.01f && sc < 4f) scales.Add(sc);
+        if (reader.TryReadStruct<float>(el + Poe2.UiElement.SizeW, out var sw) && reader.TryReadStruct<float>(el + Poe2.UiElement.SizeH, out var sh)) sizes.Add((sw, sh));
         if (reader.TryReadStruct<uint>(el + 0x300, out var id)) ids.Add(id);
         if (reader.TryReadStruct<byte>(el + 0x32E, out var bm)) biomeHist[bm] = biomeHist.GetValueOrDefault(bm) + 1;
     }
@@ -7140,9 +7260,9 @@ static int RunAtlasProbe(ProcessHandle process, MemoryReader reader)
     scales.Sort(); var zoom = scales.Count > 0 ? scales[scales.Count / 2] : 0f;
     var modeSize = sizes.GroupBy(s => s).OrderByDescending(g => g.Count()).FirstOrDefault()?.Key ?? (0, 0);
     void Check(string name, int off, bool ok, string detail) => Console.WriteLine($"    {(ok ? "PASS" : "⚠ DRIFT")}  {name,-22} +0x{off:X3}  {detail}");
-    Check("RelativePos", 0x118, finiteRel > sample.Count * 0.8 && distinctRel > sample.Count / 2, $"{finiteRel}/{sample.Count} finite, {distinctRel} distinct positions");
-    Check("scale (zoom)", 0x130, zoom is > 0.05f and < 4f, $"median zoom = {zoom:F4} (expect ~0.85 at max zoom-out)");
-    Check("Size W/H", 0x288, modeSize.Item1 is >= 16 and <= 128, $"mode size = {modeSize.Item1:F0}x{modeSize.Item2:F0} (expect ~40x40)");
+    Check("RelativePos", Poe2.UiElement.RelativePos, finiteRel > sample.Count * 0.8 && distinctRel > sample.Count / 2, $"{finiteRel}/{sample.Count} finite, {distinctRel} distinct positions");
+    Check("scale (zoom)", Poe2.UiElement.LocalScaleMul, zoom is > 0.05f and < 4f, $"median zoom = {zoom:F4} (expect ~0.85 at max zoom-out)");
+    Check("Size W/H", Poe2.UiElement.SizeW, modeSize.Item1 is >= 16 and <= 128, $"mode size = {modeSize.Item1:F0}x{modeSize.Item2:F0} (expect ~40x40)");
     Check("MapNodeId", 0x300, ids.Count >= 20, $"{ids.Count} distinct ids over {sample.Count} nodes (a map-TYPE id, shared by same-type nodes — element addr is the unique key)");
     Check("Biome", 0x32E, biomeHist.Keys.Count(k => k is >= 1 and <= 12) >= 3, $"biomes present: {string.Join(",", biomeHist.Keys.OrderBy(k => k))}");
 
@@ -7489,6 +7609,19 @@ static int RunAtlasMarker(ProcessHandle process, MemoryReader reader)
         var first = SafePtr(reader, el + 0x10);
         if (first != 0 && reader.TryReadStruct<nint>(el + 0x18, out var last))
         { var n = ((long)last - (long)first) / 8; if (n is > 0 and <= 16384) for (long k = 0; k < n; k++) queue.Enqueue(SafePtr(reader, first + (nint)(k * 8))); }
+    }
+
+    Console.WriteLine("marker-offset scan (non-node el + off → node), offsets 0x2C0..0x360:");
+    for (var o = 0x2C0; o <= 0x360; o += 8)
+    {
+        var hits = 0;
+        foreach (var el in visited)
+        {
+            if (nodeSet.Contains(el)) continue;
+            var p = SafePtr(reader, el + o);
+            if (p != 0 && nodeSet.Contains(p)) hits++;
+        }
+        if (hits > 0 && hits <= 8) Console.WriteLine($"  +0x{o:X3} → node  hits={hits}");
     }
 
     Console.WriteLine($"ATLAS CURRENT-LOCATION MARKER\n=============================\nnodes {nodes.Count}  canvas 0x{canvas:X}");
